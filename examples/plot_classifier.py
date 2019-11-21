@@ -1,17 +1,17 @@
 """
-============================
-Plotting Template Classifier
-============================
+=======================
+Plotting LAD Classifier
+=======================
 
-An example plot of :class:`skltemplate.template.TemplateClassifier`
+An example plot of :class:`lad.lad.LADClassifier`
 """
 import numpy as np
 from matplotlib import pyplot as plt
-from skltemplate import TemplateClassifier
+from lad import LADClassifier
 
 X = [[0, 0], [1, 1]]
 y = [0, 1]
-clf = TemplateClassifier()
+clf = LADClassifier()
 clf.fit(X, y)
 
 rng = np.random.RandomState(13)
