@@ -15,6 +15,7 @@ def data():
 def test_template_classifier(data):
     X, y = data
     clf = LADClassifier()
+    clf._testpaper()
 
     clf.fit(X, y)
     assert hasattr(clf, 'classes_')
