@@ -20,19 +20,17 @@
 project-template - A template for scikit-learn contributions
 ============================================================
 
-.. _scikit-learn: https://scikit-learn.org
+.. _LADClassifier: https://github.com/GregoryMorse/LADClassifier
 
-**project-template** is a template project for scikit-learn_ compatible
-extensions.
+**LADClassifier** is a Logical Analysis of Data classifier for Python's scikit-learn_.
 
-It aids development of estimators that can be used in scikit-learn pipelines
-and (hyper)parameter search, while facilitating testing (including some API
-compliance), documentation, open source development, packaging, and continuous
-integration.
+It allows for Boolean equations of features to be found in a data set.
+This provides a human readable and understandable pattern which has
+practical use.  As well the classifier can often outperform other
+classifiers and has its own resilience to over fitting in some contexts.
 
-.. _documentation: https://sklearn-template.readthedocs.io/en/latest/quick_start.html
+.. _documentation: https://github.com/GregoryMorse/LADClassifier/blob/master/doc/quick_start.rst
 
-Refer to the documentation_ to modify the template for your own scikit-learn
-contribution.
+Refer to the documentation_ to learn how to use the classifier.
 
-*Thank you for cleanly contributing to the scikit-learn ecosystem!*
+*Thank you for any bug or issue reports or pull requests or any other contributions LADClassifier project!*
