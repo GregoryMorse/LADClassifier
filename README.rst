@@ -17,8 +17,8 @@
 .. |ReadTheDocs| image:: https://readthedocs.org/projects/sklearn-template/badge/?version=latest
 .. _ReadTheDocs: https://sklearn-template.readthedocs.io/en/latest/?badge=latest
 
-project-template - A template for scikit-learn contributions
-============================================================
+LADClassifier - A Logical Analysis of Data classifier for Python's scikit-learn
+===============================================================================
 
 .. _LADClassifier: https://github.com/GregoryMorse/LADClassifier
 
