@@ -1,5 +1,5 @@
 #! /usr/bin/env python
-"""A template for scikit-learn compatible packages."""
+"""Logical Analysis of Data (LAD) for Python's scikit-learn."""
 
 import codecs
 import os
@@ -7,19 +7,19 @@ import os
 from setuptools import find_packages, setup
 
 # get __version__ from _version.py
-ver_file = os.path.join('skltemplate', '_version.py')
+ver_file = os.path.join('lad', '_version.py')
 with open(ver_file) as f:
     exec(f.read())
 
-DISTNAME = 'sklearn-template'
-DESCRIPTION = 'A template for scikit-learn compatible packages.'
+DISTNAME = 'LADClassifier'
+DESCRIPTION = 'Logical Analysis of Data (LAD) for Python\'s scikit-learn.'
 with codecs.open('README.rst', encoding='utf-8-sig') as f:
     LONG_DESCRIPTION = f.read()
-MAINTAINER = 'V. Birodkars, G. Lemaitre'
-MAINTAINER_EMAIL = 'vighneshbirodkar@nyu.edu, g.lemaitre58@gmail.com'
-URL = 'https://github.com/scikit-learn-contrib/project-template'
-LICENSE = 'new BSD'
-DOWNLOAD_URL = 'https://github.com/scikit-learn-contrib/project-template'
+MAINTAINER = 'Gregory Morse'
+MAINTAINER_EMAIL = 'gregory.morse@live.com'
+URL = 'https://github.com/GregoryMorse/LADClassifier'
+LICENSE = 'MIT'
+DOWNLOAD_URL = 'https://github.com/GregoryMorse/LADClassifier'
 VERSION = __version__
 INSTALL_REQUIRES = ['numpy', 'scipy', 'scikit-learn']
 CLASSIFIERS = ['Intended Audience :: Science/Research',
