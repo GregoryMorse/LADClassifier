@@ -1,11 +1,69 @@
+"""
+This module contains the LAD classifier implementation
+"""
 import numba
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, MultiOutputMixin
-from sklearn.utils.validation import check_is_fitted
+from sklearn.utils.validation import check_is_fitted #check_X_y
+from sklearn.utils.multiclass import unique_labels
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils import check_array
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, precision_score, f1_score, confusion_matrix
 from scipy.sparse import issparse
+
+import matplotlib.pyplot as plt
+def plot_confusion_matrix(y_true, y_pred, classes,
+                          normalize=False,
+                          title=None,
+                          cmap=plt.cm.Blues):
+    """
+    This function prints and plots the confusion matrix.
+    Normalization can be applied by setting `normalize=True`.
+    """
+    if not title:
+        if normalize:
+            title = 'Normalized confusion matrix'
+        else:
+            title = 'Confusion matrix, without normalization'
+
+    # Compute confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
+    # Only use the labels that appear in the data
+    classes = classes[unique_labels(y_true, y_pred)]
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        print("Normalized confusion matrix")
+    else:
+        print('Confusion matrix, without normalization')
+
+    print(cm)
+
+    fig, ax = plt.subplots()
+    im = ax.imshow(cm, interpolation='nearest', cmap=cmap)
+    ax.figure.colorbar(im, ax=ax)
+    # We want to show all ticks...
+    ax.set(xticks=np.arange(cm.shape[1]),
+           yticks=np.arange(cm.shape[0]),
+           # ... and label them with the respective list entries
+           xticklabels=classes, yticklabels=classes,
+           title=title,
+           ylabel='True label',
+           xlabel='Predicted label')
+
+    # Rotate the tick labels and set their alignment.
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+             rotation_mode="anchor")
+
+    # Loop over data dimensions and create text annotations.
+    fmt = '.2f' if normalize else 'd'
+    thresh = cm.max() / 2.
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, format(cm[i, j], fmt),
+                    ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black")
+    fig.tight_layout()
+    return ax
 """
 import cProfile
 cProfile.run('import lad; lad.test_lad()', 'ladstats', sort='tottime')
@@ -14,9 +72,66 @@ p = pstats.Stats('ladstats')
 p.strip_dirs().sort_stats('tottime').print_stats()
 """
 class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
-    def __init__(self, degree=4, random=True, maxcombs=2000, threshold_pct=0.9,
+    """ Logical Analysis of Data Classifier which includes a binarizer.
+
+    For more information regarding how to use the LAD classifier, read more
+    in the :ref:`User Guide <user_guide>`.
+
+    Parameters
+    ----------
+    degree : int, default=4
+        Specifies the maximum degree of features to use for pattern finding.
+    random : bool, default=True
+        Specifies to use a random search of features, otherwise exhaustive
+        combinations are tried.  If the degree is greater than or equal to
+        the number of features, a random search will not be used regardless
+        of this parameter.
+    maxcombs : int, default=2000
+        For a random search, the maximum number of combinations to try before
+        recomputing the rows remaining and checking if convergence is occurring.
+    threshold_pct : float, default=0.9
+        The minimum precision of a pattern for it to be considered.
+    minmatch_pct : float, default=0.001
+        The minimum percentage of all samples which must be found covered by a
+        pattern for it to be considered.
+    feature_names : list, default=None
+        The list of feature names corresponding to the features which will be
+        used in the fit function call so the binarizer can generate meaningful
+        pattern names or Boolean features can have their negation indicated.
+        This is optional.
+    binarizer_params : list, default=None
+        The parameters passed to the binarizer specifying its method and
+        division strategy.  The binarizer methods can also be used outside the
+        model prior to classification.
+    penalty_value : int, default=None
+        Optional penalty value which will penalize precision based on the number
+        of true values found with exponential decay.  The value must be greater
+        than 1 and the higher, the more exponential decay will occur.  The
+        default value has no penalty.
+    random_state : int, default=None
+        If int, random_state is the seed used by the random number generator;
+        If RandomState instance, random_state is the random number generator;
+        If None, the random number generator is the RandomState instance
+        used by np.random.
+
+    Attributes
+    ----------
+    n_outputs_ : int
+        The number of output columns.
+    classes_ : ndarray, shape (n_classes,)
+        The classes seen at :meth:`fit`.
+    n_classes_ : int
+        The number of unique classes seen at :meth:`fit`.
+    self.featnames_ : list
+        The feature names computed for each feature if feature_names was provided.
+    self.binarizer_values_ : list
+        The binarizer parameters computed for each feature.
+    self.bounds_ : list
+        The shape of each dimension of the features after binarization.
+    """
+    def __init__(self, degree=4, random=True, maxcombs=100, threshold_pct=1,
                  minmatch_pct=0.001, feature_names=None, binarizer_params=None,
-                 remaining_label=None, mutual_exclusions=[]):
+                 penalty_value=None, random_state=None):
         self.degree = degree
         self.random = random
         self.maxcombs = maxcombs
@@ -24,35 +139,126 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         self.minmatch_pct = minmatch_pct
         self.feature_names = feature_names
         self.binarizer_params = binarizer_params
-        self.remaining_label = remaining_label #priority order also could add, could be based on score or user defined order
+        self.penalty_value = penalty_value #10000000
+        self.random_state = random_state
         #self.mutual_exclusions = mutual_exclusions
         self._estimator_type = 'classifier' #needed for stratified k-folds in GridSearchCV
     #def _get_tags(self): return {'poor_score':True,'multioutput':True}
-    def binarizer(self, data, method='minimumdifferentiated', divisions=10,
-                  mn=-1, mx=-1, splitpoints=[], binarymode=True):
+    """Binarizer for LAD classifier.
+    This routine allows for convienent binarization of a single feature prior
+    to LAD classification preventing binarization from influencing
+    the algorithm.  It is recommended to use binarize instead of this routine,
+    unless the parameters such as the minimum and maximum or cut points are already known.
+
+    Parameters
+    ----------
+    data : array-like, shape (n_samples, n_features)
+        The training input samples.
+    method : string, default='minimumdifferentiated'
+        Either 'minimumdifferentiated', 'equaldivisons'
+        or 'equaldistribution'.
+    divisions : int, default=10
+        The number of divisions for 'equaldivisions' method.
+        It should be greater than or equal to 2.
+    mn : float or int, default=-1
+        The minimum for the division boundary when using 'equaldivisions'.
+    mx : float or int, default=-1
+        The maximum for the division boundary when using 'equaldivisions'.
+    splitpoints : list, default=[]
+        The list of cut points as 2-tuples for start of interval and end of interval,
+        and ideally should be continuous without any gaps.  The first and last interval,
+        are computed in a one sided manner.  For 'equaldistribution' and
+        'minimumdifferentiated' methods only.  If only 2 cut points, then a single
+        binary feature will be used as it is sufficient for this special case.
+    binarymode : bool, default=True
+        This is True if opting for binary features only, otherwise if False, then the
+        features will be discretized as numbers from 0 to the number of cut points minus 1
+        except in the case of only 2 cut points where there is no difference for this parameter.
+    interval : bool, default=True
+        This is True if non-overlapping mutually exclusive intervals should be used,
+        otherwise False for levels which use only monotonically increasing inequalities.
+        In the case of only 2 cut points, this parameter makes no difference.
+
+    Returns
+    -------
+    conditions : list
+        Returns list of binarized sub-features for the provided feature which can be
+        converted to a numpy array and transposed if they will be used in the LADClassifier.
+    """
+    def binarizer(data, method='minimumdifferentiated', divisions=10,
+                  mn=-1, mx=-1, splitpoints=[], binarymode=True, interval=True):
+        #2 cut points uses a special reduction to binary because of mutual exclusivity of the values in each division
         if method == 'equaldivisions':
             dist = (mx - mn) / divisions
-            if binarymode:
-                cond = [((data >= splitpoints[j][0]) if j != 0 else True) &
-                     ((data < splitpoints[j][1]) if j != len(splitpoints)-1 else True) for j in range(divisions)]
-            else:
-                cond = np.zeros(len(data), dtype=np.uint32)                
-                for j in range(divisions):
-                    cond[((data >= mn + dist * j) if j != 0 else True) &
-                         ((data < mn + dist * (j+1)) if j != divisions-1 else True)] = j
-        else:
-            if binarymode:
-                cond = [((data >= splitpoints[j][0]) if j != 0 else True) &
-                         ((data < splitpoints[j][1]) if j != len(splitpoints)-1 else True) for j in range(len(splitpoints))]
+            if dist == 0 or divisions == 1:
+                cond = [np.ones(len(data), dtype=np.bool_)]
+            elif binarymode:
+                cond = [((data >= mn + dist * j) if j != 0 else True) &
+                     ((data < mn + dist * (j+1)) if j != divisions-1 and interval else True) for j in range(0 if interval or divisions==2 else 1, 1 if divisions==2 else divisions)]
             else:
                 cond = np.zeros(len(data), dtype=np.uint32)
-                for j in range(len(splitpoints)):
+                for j in range(0 if interval or divisions==2 else 1, 1 if divisions==2 else divisions):
+                    cond[((data >= mn + dist * j) if j != 0 else True) &
+                         ((data < mn + dist * (j+1)) if j != divisions-1 and interval else True)] = j
+                    #cond[~(((data >= mn + dist * j) if j != 0 else True) &
+                    #     ((data < mn + dist * (j+1)) if j != divisions-1 else True))] = j + divisions
+        else:
+            if len(splitpoints) <= 1:
+                cond = [np.ones(len(data), dtype=np.bool_)]
+            elif binarymode:
+                cond = [((data >= splitpoints[j][0]) if j != 0 else True) &
+                         ((data < splitpoints[j][1]) if j != len(splitpoints)-1 and interval else True) for j in range(0 if interval or divisions==2 else 1, 1 if len(splitpoints)==2 else len(splitpoints))]
+            else:
+                cond = np.zeros(len(data), dtype=np.uint32)
+                for j in range(0 if interval or divisions==2 else 1, 1 if len(splitpoints)==2 else len(splitpoints)):
                     cond[((data >= splitpoints[j][0]) if j != 0 else True) &
-                         ((data < splitpoints[j][1]) if j != len(splitpoints)-1 else True)] = j
+                         ((data < splitpoints[j][1]) if j != len(splitpoints)-1 and interval else True)] = j
+                    #cond[~(((data >= splitpoints[j][0]) if j != 0 else True) &
+                    #     ((data < splitpoints[j][1]) if j != len(splitpoints)-1 else True))] = j + len(splitpoints)
         return cond
     #equal divisions, equal distribution, minimum differentiated ranges in output
     #['equaldivisions', 'equaldistribution', 'minimumdifferentiated']
-    def binarize(self, data, name, y, method='minimumdifferentiated', divisions=10, binarymode=True):
+
+    """Automatic Binarizer for LAD classifier.
+    This routine allows for convienent binarization of data prior
+    to LAD classification preventing binarization from influencing
+    the algorithm.  This routine guides the process by computing the
+    method parameters before binarizing with the binarizer function,
+    as well as providing readable feature names.
+
+    Parameters
+    ----------
+    data : array-like, shape (n_samples, n_features)
+        The training input samples.
+    name : string
+        The feature name.
+    y : array-like, shape (n_samples,)
+        The target values. An array of int.
+    method : string, default='minimumdifferentiated'
+        Either 'minimumdifferentiated', 'equaldivisons'
+        or 'equaldistribution'.
+    divisions : int, default=10
+        The number of divisions for 'equaldivisions' and 'equaldistribution' methods.
+        It should be greater than or equal to 2.
+    binarymode : bool, default=True
+        This is True if opting for binary features only, otherwise if False, then the
+        features will be discretized as numbers from 0 to the number of cut points minus 1
+        except in the case of only 2 cut points where there is no difference for this parameter.
+    interval : bool, default=True
+        This is True if non-overlapping mutually exclusive intervals should be used,
+        otherwise False for levels which use only monotonically increasing inequalities.
+        In the case of only 2 cut points, this parameter makes no difference.
+
+    Returns
+    -------
+    (binarizer_values, conditions, feature_names) : (list, list, list)
+        Returns 3 lists, the first with the binarizer parameter for the given feature.
+        The second is the binarized features which can be converted to a numpy array and transposed
+        if they will be used in the LADClassifier.
+        The third is the readable list of feature names corresponding to each generated feature,
+        based on the name provided.
+    """
+    def binarize(data, name, y, method='minimumdifferentiated', divisions=10, binarymode=True, interval=True):
         if method == 'equaldivisions':
             mn, mx = min(data), max(data)
             dist = (mx - mn) / divisions
@@ -62,7 +268,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                      for j in range(divisions)]
         elif method == 'equaldistribution': #need to handle splits on equivalence groups, right now redundant or duplicate values possible
             sz, sorted = len(data), np.sort(data)
-            divs = [(sorted[int(sz * j / divisions)], sorted[int(sz * (j+1) / divisions)-(1 if j == len(divisions)-1 else 0)])
+            divs = [(sorted[int(sz * j / divisions)], sorted[int(sz * (j+1) / divisions)-(1 if j == divisions-1 else 0)])
                     for j in range(divisions)]
             binvals = {'method':method, 'divisions': len(divs), 'splitpoints':divs, 'binarymode':binarymode}
             featnames = [name + ('>=' + str(round(divs[j][0], 2)) if j != 0 else '') +
@@ -71,53 +277,102 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         elif method == 'minimumdifferentiated':
             sorted = list(zip(data, y))
             sorted.sort()
-            divs, featnames, base = [], [], 0
+            divs, featnames = [], []
             #cannot ignore duplicate values or could wrongly collapse to single division
-            x = -1
-            while x < len(sorted):
-                eqvcls, y = False, x + 1
-                while y < len(sorted) - 1:
-                    if sorted[y][0] != sorted[y+1][0]: break
-                    if sorted[y][1] != sorted[y+1][1]: eqvcls = True
-                    y += 1
-                if x == len(sorted)-1 or eqvcls or x != -1 and sorted[x][1] != sorted[y][1] and sorted[x][0] != sorted[y][0]:
-                    divs.append((sorted[base][0], sorted[y if x != len(sorted)-1 else x][0]))
-                    #condarr.append((data >= sorted[base][0]) & (data <= sorted[x][0]))
-                    featnames.append(name + (('>=' + str(round(sorted[base][0], 2))) if len(divs) != 1 else '') +
-                                     ('<' + str(round(sorted[y][0], 2)) if x != len(sorted)-1 else ''))
-                    base = y
-                x = y
+            lastval, x = sorted[0], 1
+            while x <= len(sorted):
+                nextval = sorted[x] if x != len(sorted) else lastval
+                while x < len(sorted) - 1:
+                    if sorted[x][0] != sorted[x+1][0]: break
+                    if sorted[x][1] != sorted[x+1][1]: nextval = (nextval[0], None)
+                    x += 1
+                if x == len(sorted) and len(divs) != 0 or lastval[1] is None or nextval[1] != lastval[1] and nextval[0] != lastval[0]:
+                    divs.append((lastval[0], nextval[0]))
+                    #condarr.append((data >= lastval[0]) & (data <= sorted[x][0]))
+                    featnames.append(name + (('>=' + str(round(lastval[0], 2))) if len(divs) != 1 else '') +
+                                     ('<' + str(round(nextval[0], 2)) if x != len(sorted) else ''))
+                    lastval = nextval
+                x += 1
             binvals = {'method':method, 'divisions':len(divs), 'splitpoints':divs, 'binarymode':binarymode}
-        if binvals['binarymode']: featnames = [['!' + x, x] for x in featnames]
-        return binvals, self.binarizer(data, **binvals), featnames
-    def binarizeall(self, X, y, feature_names, binarizer_params):
+        if binvals['binarymode']: featnames = [['!' + x, x] for x in featnames] #for True/False values that were binarized this way, False will come first then True due to 0/1 ordering
+        #else: featnames.extend(['!' + x for x in featnames])
+        return binvals, LADClassifier.binarizer(data, **binvals), featnames
+    """All data binarizer for LAD classifier.
+    This routine allows for convienent binarization of all data prior
+    to LAD classification preventing binarization from influencing
+    the algorithm.  This routine guides the process by computing the
+    method parameters before binarizing with the binarizer function.
+
+    Parameters
+    ----------
+    X : array-like, shape (n_samples, n_features)
+        The training input samples.
+    y : array-like, shape (n_samples,)
+        The target values. An array of int.
+    feature_names : list of string, default=None
+        The feature names for each feature in X.  If None is passed,
+        it will automatically label features 1...N as 'Feature1', 'Feature2', ..., 'FeatureN'.
+    binarizer_params : dict, default=None
+        The parameters which will be passed to binarize, containing any parameters from:
+        'method', 'divisions', 'binarymode', 'interval'.
+
+    Returns
+    -------
+    (X_new, feature_names, binarizer_values, bounds) : (array, list, list, list)
+        Returns an array and 3 lists, the first with the binarized features as a numpy array
+        and already transposed for use in the LADClassifier.  The second is the readable list
+        of feature names corresponding to each generated feature, based on the names provided.
+        into the binarizer parameter for the given feature.  The third is the binarizer
+        parameters for the given features.  The last is the shape of all of the generated features.
+    """
+    def binarizeall(X, y, feature_names=None, binarizer_params=None):
         feature_names = ['Feature' + str(x+1) for x in range(X.shape[1])] if feature_names is None else feature_names
         condarr, featnames, binvals, bounds = [], [], [], []
         for i in range(X.shape[1]):
-            if X[:,i].dtype is np.dtype(np.bool_):
+            if X[:,i].dtype.type is bool or X[:,i].dtype.type is np.bool_:
                 condarr.append(X[:,i]), featnames.append(['!' + feature_names[i], feature_names[i]]), binvals.append(None), bounds.append(2)
             else:
                 binparams = {} if binarizer_params is None else (binarizer_params[i] if type(binarizer_params) is list else binarizer_params)
-                vals, conds, feats = self.binarize(X[:,i], feature_names[i], y, **binparams)
+                vals, conds, feats = LADClassifier.binarize(X[:,i], feature_names[i], y, **binparams)
                 binvals.append(vals)
                 if vals['binarymode']:
                     condarr.extend(conds), featnames.extend(feats), bounds.extend([2] * len(conds))
                 else:
-                    condarr.append(conds), featnames.append(feats), bounds.append(vals['divisions'])
+                    condarr.append(conds), featnames.append(feats), bounds.append(vals['divisions']) #* 2
                 #mutex.append(np.arange(len(condarr)-len(conds), len(condarr)))
         return np.array(condarr).transpose(), featnames, binvals, bounds
-    def postbinarize(self, X, binarizer_values):
+    """All data post-binarizer for LAD classifier.
+    This routine allows for convienent post-binarization of data
+    which has not yet been binarized, but previous representative data
+    has been binarized and its parameters will be used to binarize this data.
+    Typically useful when binarizing the training data, then post-binarizing the test data.
+
+    Parameters
+    ----------
+    X : array-like, shape (n_samples, n_features)
+        The training input samples.
+    binarizer_values : dict, default=None
+        The parameters which will be passed to binarizer, containing any parameters from:
+        'method', 'divisions', 'mn', 'mx', 'splitpoints', 'binarymode', 'interval'.
+
+    Returns
+    -------
+    X_new : array
+        Returns an array with the post-binarized features as a numpy array
+        and already transposed for use in the LADClassifier.
+    """
+    def postbinarize(X, binarizer_values):
         condarr = []
         for i in range(X.shape[1]):
             if binarizer_values[i] is None:
                 condarr.append(X[:,i])
             elif binarizer_values[i]['binarymode']:
-                condarr.extend(self.binarizer(X[:,i], **binarizer_values[i]))
+                condarr.extend(LADClassifier.binarizer(X[:,i], **binarizer_values[i]))
             else:
-                condarr.append(self.binarizer(X[:,i], **binarizer_values[i]))
+                condarr.append(LADClassifier.binarizer(X[:,i], **binarizer_values[i]))
         return np.array(condarr).transpose()
     #['lt', 'eq', 'gt', 'lte', 'neq', 'gte']
-    def binarizecompare(self, X, feature_names, featcomp, operations=['lt', 'eq', 'gt']):
+    def binarizecompare(X, feature_names, featcomp, operations=['lt', 'eq', 'gt']):
         feature_names = ['Feature' + str(x+1) for x in range(X.shape[1])] if feature_names is None else feature_names
         compdict = {'lt':(np.less, '<'), 'eq':(np.equal, '=='), 'gt':(np.greater, '>'),
                     'lte':(np.less_equal, '<='), 'neq':(np.not_equal, '!='), 'gte':(np.greater_equal, '>=')}
@@ -133,8 +388,12 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 featnames.append(featnames[i[0]] + compdict[c][1] + featnames[i[1]])
             mutex.extend([[len(condarr) - len(c) + x for x in y] for y in muts])
         return condarr, featnames, mutex
-    def _testpaper(self):
-        #https://www.sciencedirect.com/science/article/pii/S0166218X05003161
+    """Paper test with simple and general but inefficient code as a proof of concept.
+    It shows that the paper example works with a series of assertions for its 3 algorithms.
+    Paper: https://www.sciencedirect.com/science/article/pii/S0166218X05003161    
+    """
+    def _testpaper():
+        
         #paper example
         def calc_PI_V0(X, n=None):
             if n is None: n = range(len(X.shape))
@@ -223,8 +482,76 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             PiVi.append(calc_PI_VI(gcodes[i-1][0][istar], gcodes[i][0][istar], istar, gcodes[i][2][istar], PiVi[-1]))
             #print(PiVi[-1])
         assert(np.all([np.array_equal(x, PiVi[i]) for i, x in enumerate(PiVipaperC)]))
+    """Plots learning examples of algorithm and the Iris dataset.
+
+    Parameters
+    ----------
+    curdir : string
+        The output directory for PNG and SVG images generated.
+    """
+    def _make_learn_plots(curdir):
+        import matplotlib.pyplot as plt
+        import os
+        plt.clf()
+        plt.subplot(111)
+        plt.xlim(0, 4)
+        plt.ylim(0, 5)
+        plt.gca().set_xticks(np.arange(5))
+        plt.annotate('', (4, 0), (0, 0), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (0, 0), (0, 1), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (0, 1), (4, 1), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (4, 1), (4, 2), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (4, 2), (0, 2), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (0, 2), (0, 3), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (0, 3), (4, 3), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (4, 3), (4, 4), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (4, 4), (0, 4), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (0, 4), (0, 5), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.annotate('', (0, 5), (4, 5), arrowprops=dict(arrowstyle="-|>", shrinkA=0, shrinkB=0, color='red'))
+        plt.grid(True)
+        plt.title('Demonstration of extended Gray code iteration strategy')
+        plt.xlabel('Feature 1')
+        plt.ylabel('Feature 2')
+        plt.tight_layout()
+        plt.savefig(os.path.join(curdir, 'data', 'gcodes.svg'), format='svg')#, bbox_inches = extent, pad_inches = 0)
+        plt.savefig(os.path.join(curdir, 'data', 'gcodes.png'), format='png')#, bbox_inches = extent, pad_inches = 0)       
+        plt.gcf()
+        from sklearn.model_selection import GridSearchCV
+        from sklearn.metrics import confusion_matrix
+        from sklearn import datasets
+        bec = LADClassifier(maxcombs=500)
+        iris = datasets.load_iris()
+        bec.feature_names = iris.feature_names
+        #condarr, featnames, binvals, mutex = bec.binarizeall(iris.data, iris.target, iris.feature_names)
+        params = [{'degree':[4], 'threshold_pct':[1]}]
+        clf = GridSearchCV(bec, params, cv=5, iid=True, error_score='raise', verbose=100)
+        with np.printoptions(precision=2, suppress=True):
+            mdl = clf.fit(iris.data, iris.target)
+            o = clf.predict(iris.data) #it is already refitted with the best model
+            cm = confusion_matrix(iris.target, o)
+            print(clf.best_score_, cm, clf.best_estimator_.format_booleqs())
+            plot_confusion_matrix(iris.target, o, classes=iris.target_names, cmap=plt.cm.Blues, normalize=False)
     def fit(self, X, y):
-        #binarization
+        """LAD classifer implementation of a fitting function.
+        It first binarizes the data if necessary, then finds patterns
+        until full sample coverage or convergence is determined not possible.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            The training input samples.
+        y : array-like, shape (n_samples,)
+            The target values. An array of int.
+
+        Returns
+        -------
+        self : object
+            Returns self.
+        """
+        #binarization comes first
+        #X, y = check_X_y(X, y)
+        #self.classes_ = unique_labels(y)
+        #print(X.shape[1])
         X = check_array(X, dtype=[np.float_, np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64, np.float16, np.float32, np.float64, np.bool_], accept_sparse=False) #"csc")
         y = check_array(y, ensure_2d=False, dtype=None)
         if issparse(X):
@@ -237,7 +564,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                              "does not match number of samples=%d"
                              % (len(y), X.shape[0]))
         check_classification_targets(y)
-        condarr, self.featnames_, self.binarizer_values_, self.bounds_ = self.binarizeall(X, y, self.feature_names, self.binarizer_params)
+        condarr, self.featnames_, self.binarizer_values_, self.bounds_ = LADClassifier.binarizeall(X, y, self.feature_names, self.binarizer_params)
         #self.mutex_ = self.mutual_exclusions[:] + self.mutex_
         #self.mutex_ = {y:x for x in self.mutex_ for y in x}
         self.outtype_ = y.dtype
@@ -245,13 +572,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             self.n_outputs_ = 1
             self.classes_ = np.unique(y)
             self.n_classes_ = self.classes_.shape[0]
-            remaining_label = self.classes_[-1] if self.remaining_label is None else self.remaining_label
-            self.booleqs_ = {} #(prefer positive, positive patterns, negative patterns)
-            for c in self.classes_:
-                if c == remaining_label:
-                    self.booleqs_[c] = ()
-                    continue
-                self.booleqs_[c] = self._fit(condarr, y == c)
+            self.booleqs_ = self._fit(condarr, y, self.classes_)
         else:
             self.n_outputs_ = y.shape[1]
             self.classes_ = []
@@ -263,20 +584,17 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 self.n_classes_.append(classes_k.shape[0])
                 self.booleqs_.append({}) #(prefer positive, positive patterns, negative patterns)
             for k in range(self.n_outputs_):
-                remaining_label = self.classes_[k][-1] if self.remaining_label is None else (self.remaining_label[k] if type(self.remaining_label) is list else self.remaining_label)
-                for c in self.classes_[k]:
-                    if c == remaining_label:
-                        self.booleqs_[k][c] = ()
-                        continue
-                    self.booleqs_[k][c] = self._fit(condarr, y[:, k] == c)
+                self.booleqs_[k] = self._fit(condarr, y[:, k], self.classes_[k])
         return self
-    def _fit(self, X, y): #in DNF, if want CNF, can negate X and y per DeMorgan's law?
-        noty = np.logical_not(y)
-        posvals, negvals = X[y,:], X[noty,:]
+    def _fit(self, X, y, classes): #in DNF, if want CNF, can negate X and y per DeMorgan's law?
+        #print(X.shape[1])
+        vals, origsz = [], len(X)
+        for k in classes:
+            vals.append(X[y == k,:])
         minmatch = int(len(y) * self.minmatch_pct)
         import itertools
         def prec_penalty(precision, featpct): #reduce precision based on number of features
-            a = 10000000
+            a = self.penalty_value
             return (a ** (1-featpct) - 1) / (a-1) * precision #exponential between 0 and 1: (a^x-1)/(a-1) where higher a has higher decay                
         #@numba.njit
         def sum_func(a):
@@ -295,11 +613,22 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 #calc_PI_V0_axis(X, X.shape[:i], X.shape[i+1:], np.s_[:,])
                 #Ni, Nk = tuple([slice(None, None, None)] * i), tuple([slice(None, None, None)] * (len(X.shape)-1 - i-1))
                 #for j in range(X.shape[i]-1-1, -1, -1): X[Ni + np.s_[j,] + Nk] += X[Ni + np.s_[j+1,] + Nk]
-                view = X.swapaxes(0, i)
-                view = np.cumsum(view[::-1], axis=0)[::-1]
-                X = view.swapaxes(0, i)               
+                view = np.flip(X.swapaxes(0, i), 0)
+                np.cumsum(view, 0, out=view)
                 #X = np.apply_along_axis(sum_func, i, X)
             return X
+        def mod_gray_code(K):
+            codes, istar, V, T = [], 0, np.array(K), np.repeat(-1, len(K))
+            while True:
+                codes.append((np.array(V), istar, np.array(T)))
+                VT = V + T
+                S = np.nonzero((VT >= 0) & (VT <= K))[0]
+                if len(S) == 0: break
+                istar = np.max(S)
+                V[istar] = V[istar] + T[istar]
+                #T[istar+1:] = -T[istar+1:]
+                #print(V)
+            return codes
         def extended_gray_code(K):
             codes, istar, V, T = [], 0, np.array(K), np.repeat(-1, len(K))
             while True:
@@ -311,7 +640,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 V[istar] = V[istar] + T[istar]
                 T[istar+1:] = -T[istar+1:]
                 #print(V)
-            return codes               
+            return codes
         #@numba.njit
         def diff_func(a, Vistar, Vprimeistar):
             a[Vistar+1:] -= a[Vistar]
@@ -392,9 +721,13 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         #assert(np.all([subpat([], []) == 2, subpat([1], [0]) == -1, subpat([1], [1]) == 2, subpat([1], [1, 2]) == 1,
         #       subpat([1, 2], [1]) == 0, subpat([2], [1, 2]) == 1, subpat([1, 2], [2]) == 0, subpat([1, 3], [1, 2, 3]) == 1, subpat([1, 2, 3], [1, 3]) == 0]))
         #n chooses degree projections to consider
-        def add_permute(cmb, sigmaI, pos, neg, pats, negpats):
-            if sigmaI <= 1 - self.threshold_pct and neg >= minmatch: do_add_permute(cmb, 1 - sigmaI, neg, negpats) #negative pattern
-            if sigmaI >= self.threshold_pct and pos >= minmatch: do_add_permute(cmb, sigmaI, pos, pats) #positive pattern
+        def add_permute(cmb, counts, tot, pats):
+            for k in range(len(counts)):
+                sigmaI = counts[k] / tot
+                if not self.penalty_value is None:
+                    sigmaI = prec_penalty(sigmaI, counts[k] / origsz)
+                if sigmaI >= self.threshold_pct and counts[k] >= minmatch:
+                    do_add_permute(cmb, sigmaI, counts[k], pats[k]) #positive pattern
         def do_add_permute(cmb, sigmaI, num, pats):
             #if len(pats) > maxconds * 2: del pats[:-maxconds]
             #for x in range(len(cmb)):
@@ -432,37 +765,58 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     if sigmaI < pats[mid][0]: hi = mid
                     else: lo = mid+1
                 pats.insert(lo, (sigmaI, num, found))            
-        def calc_permute(comb, pats, negpats):
+        def calc_permute(comb, pats):
             #deg = len(comb)
             #gcodes = extended_gray_code(tuple([1] * deg))
-            r, rn = posvals[:,comb], negvals[:,comb]
             #if deg == 1: #fast route for single features
             #    pos, neg = np.sum(r), np.sum(rn)
             #    tot = pos + neg
             #    if tot == 0: return
-            #    add_permute(comb, pos / tot, pos, neg, pats, negpats)
+            #    add_permute(comb, pos / tot, pos, neg, pats)
             #else:
             bounds = tuple([self.bounds_[x] for x in comb])
             if bounds in gcodesdict: gcodes = gcodesdict[bounds]
             else:
-                gcodes = extended_gray_code(tuple([x - 1 for x in bounds]))
+                gcodes = mod_gray_code(tuple([x - 1 for x in bounds])) #extended_gray_code(tuple([x - 1 for x in bounds]))
                 gcodesdict[bounds] = gcodes
             #print(bounds)
-            M, Mneg = np.zeros(bounds, dtype=np.uint32), np.zeros(bounds, dtype=np.uint32)
-            #for x in r.astype(np.uint32): M[tuple(x)] += 1
-            np.add.at(M, tuple(r.T.astype(np.uint32)), 1)
-            #for x in rn.astype(np.uint32): Mneg[tuple(x)] += 1
-            np.add.at(Mneg, tuple(rn.T.astype(np.uint32)), 1)
-            PiV0, PiV0neg = calc_PI_V0(M), calc_PI_V0(Mneg) #start at tuple([1] * deg)
+            PiV0s = []
+            for v in vals:
+                M = np.zeros(bounds, dtype=np.uint32)
+                r = v[:,comb]
+                #for x in r.astype(np.uint32): M[tuple(x)] += 1
+                np.add.at(M, tuple(r.T.astype(np.uint32)), 1)
+                PiV0s.append(calc_PI_V0(M)) #start at tuple([1] * deg)
             #idx = tuple([1] * deg)
             b = gcodes[0][0] #initial PI_V0 index
-            for gcode in range(len(gcodes)):
+            #np.arange(np.prod(bounds)).reshape(bounds)
+            num_gcodes, lenV, lenPiV0s = len(gcodes), len(b), len(PiV0s)
+            cmb = np.array(comb)
+            for gcode in range(num_gcodes):
                 #i = np.ndindex(bounds)
                 curgcode = gcodes[gcode]
                 V = curgcode[0]
+                idxs = np.ix_(*[[0, x] if y else [x] for x,y in zip(V, V==b)])
+                counts = np.array([PiV0[idxs] for PiV0 in PiV0s])
+                tots = np.sum(counts, 0)
+                #tots[tots != 0]
+                origidxs = np.moveaxis(np.array(np.unravel_index(np.ravel_multi_index(idxs, bounds), bounds)), 0, -1)
+                for k in range(len(counts)):
+                    sigmaI = np.zeros(counts[k].shape)
+                    np.divide(counts[k], tots, where=tots!=0, out=sigmaI)
+                    if not self.penalty_value is None:
+                        sigmaI = prec_penalty(sigmaI, counts[k] / origsz)
+                    for i in np.argwhere((sigmaI >= self.threshold_pct) & (counts[k] >= minmatch)):
+                        ti = tuple(i)
+                        #print(i, bounds, origidxs.shape, sigmaI.shape, counts[k].shape, origidxs[ti], V, cmb, np.argwhere((sigmaI >= self.threshold_pct) & (counts[k] >= minmatch)))
+                        same = V == origidxs[ti]
+                        if np.sum(same) == 0: continue
+                        ccmb = list(zip(cmb[same], V[same]))
+                        do_add_permute(ccmb, sigmaI[ti], counts[k][ti], pats[k]) #positive pattern
+                """
                 i = [tuple(V)]
-                p = np.nonzero(V == b)[0]
-                for d in range(1, min(len(p)+1, len(V))): #len(V) is only 1 permutation where its the zero-length combination
+                p = np.nonzero(V == b)[0] # (V == b) | (V == 0)
+                for d in range(1, min(len(p)+1, lenV)): #len(V) is only 1 permutation where its the zero-length combination
                     for c in itertools.combinations(p, d):
                         Vnew = np.array(V)
                         Vnew[list(c)] = 0
@@ -470,78 +824,95 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 for idx in i: #if mutually exclusive, the not values of interval are useless, only need to check where V and idx intersect
                     #if the entire interval, skip as its a zero-length combination
                     #if not np.any(idx == V): continue
-                    cmb = np.array(comb)
-                    #cmb[V == 0] = ~cmb[V == 0]
-                    same = V == idx
-                    cmb = list(zip(cmb[same], V[same]))
-                    #cmb = [(cmb[x], Vidx[x]) for x in range(len(comb)) if Vidx[x] == idx[x]] #interval from idx[x] to V[x]
-                    pos, neg = PiV0[idx], PiV0neg[idx]
-                    tot = pos + neg
-                    #preds = self._predict(X, [cmb[np.array(idx == V, dtype=np.bool_)]])
+                    counts = np.array([PiV0[idx] for PiV0 in PiV0s])
+                    tot = np.sum(counts)
+                    #for k in range(len(vals)):
+                        #preds = self._predict(vals[k], [cmb])
+                        #print(np.sum(preds), counts[k], cmb, V, idx, PiV0s[k])
+                        #assert(np.sum(preds) == counts[k])
                     #cm = conf_mat(y, preds)
                     #assert(cm[1,1] == pos and cm[0,1] == PiV0neg[idx])
                     if tot != 0:
-                        add_permute(cmb, pos / tot, pos, neg, pats, negpats)
-                if gcode == len(gcodes) - 1: break
+                        cmb = np.array(comb)
+                        #cmb[V == 0] = ~cmb[V == 0]
+                        same = V == idx
+                        cmb = list(zip(cmb[same], V[same]))
+                        #cmb = [(cmb[x], Vidx[x]) for x in range(len(comb)) if Vidx[x] == idx[x]] #interval from idx[x] to V[x]
+                        add_permute(cmb, counts, tot, pats)
+                """
+                if gcode == num_gcodes - 1: break
                 nextgcode = gcodes[gcode+1]
                 istar = nextgcode[1]
                 Vistar, Vprimeistar, Tistar = V[istar], nextgcode[0][istar], nextgcode[2][istar]
-                PiV0 = calc_PI_VI(Vistar, Vprimeistar, istar, Tistar, PiV0)
-                PiV0neg = calc_PI_VI(Vistar, Vprimeistar, istar, Tistar, PiV0neg)
+                for k in range(lenPiV0s):
+                    PiV0s[k] = calc_PI_VI(Vistar, Vprimeistar, istar, Tistar, PiV0s[k])
         gcodesdict, degree = {}, min(self.degree, X.shape[1])
         if np.all(X.shape == 2):
-            gcodesdict[tuple([2] * degree)] = extended_gray_code(tuple([1] * degree))
+            gcodesdict[tuple([2] * degree)] = mod_gray_code(tuple([1] * degree)) #extended_gray_code(tuple([1] * degree))
         permute = np.arange(X.shape[1], dtype=np.int32)
         patset = set()
-        pats, negpats = [], [] #numba.typed.List()
-        pats.append((np.float64(0), np.uint32(0), np.array([], dtype=np.int32)))
-        negpats.append((np.float64(0), np.uint32(0), np.array([], dtype=np.int32)))
+        pats = [] #numba.typed.List()
+        for k in range(len(vals)):
+            pats.append([(np.float64(0), np.uint32(0), np.array([], dtype=np.int32))])
         if self.random and X.shape[1] > degree:
+            if self.random_state is None:
+                rnd = np.random
+            elif type(self.random_state) is np.random.RandomState:
+                rnd = self.random_state
+            else:
+                rnd = np.random.RandomState(self.random_state)
             for _ in range(self.maxcombs):
-                np.random.shuffle(permute)
+                rnd.shuffle(permute)
                 for i in range(0, len(permute), degree):
-                    calc_permute(permute[i:i+degree], pats, negpats)
-            cur, curneg, c = len(posvals), len(negvals), 0
+                    calc_permute(permute[i:i+degree], pats)
+            cur, c = [len(vals[k]) for k in range(len(vals))], 0
             #cantfind = set()
-            print(cur, curneg)
+            print(cur)
             while True:
-                if len(pats) == 1: permute = np.nonzero(posvals[0])[0]
-                else:
-                    if cur != 0:
-                        preds = self._predict(X, [x[2] for x in pats])
-                        remaining = np.nonzero(~preds & y)[0] #[x for x in np.nonzero(~preds & y)[0] if x not in cantfind]
-                    preds = ~self._predict(X, [x[2] for x in negpats])
-                    remainingneg = np.nonzero(preds & ~y)[0] #[x for x in np.nonzero(preds & ~y)[0] if x not in cantfind]
-                    if len(remaining) == 0 and len(remainingneg) == 0: break
-                    permute = np.array(list(set(np.concatenate([np.nonzero(X[remaining[x]])[0] for x in range(len(remaining))] + [np.nonzero(X[remainingneg[x]])[0] for x in range(len(remainingneg))]))))
-                    if len(remaining) != cur or len(remainingneg) != curneg:
-                        cur, curneg = len(remaining), len(remainingneg)
-                        print(cur, curneg, c, len(permute))
-                    #if cur != 0:
-                    #    permute = np.nonzero(X[remaining[0]])[0]
-                    #else:
-                    #    permute = np.nonzero(X[remainingneg[0]])[0]
-                curlen, curneglen, startc = len(pats), len(negpats), c
-                while curlen == len(pats) and curneglen == len(negpats) and startc + self.maxcombs > c:
-                    np.random.shuffle(permute)
+                pmt, rem, falsethresh = [], [], []
+                for k in range(len(vals)):
+                    if cur[k] == 0: continue
+                    if len(pats[k]) == 1:
+                        remaining = np.nonzero(y == classes[k])[0]
+                        falsethresh.append(False)
+                    else:
+                        preds = self._predict(X, [x[2] for x in pats[k]])
+                        falsepos = np.sum(preds & (y != classes[k]))
+                        falsethresh.append(falsepos > len(vals[k]) * (1 - self.threshold_pct))
+                        remaining = np.nonzero(~preds & (y == classes[k]))[0]
+                    rem.append(len(remaining))
+                    pmt.extend([np.nonzero(X[remaining[x]])[0] for x in range(len(remaining))])
+                if all([x == 0 for x in rem]) or all(falsethresh): break
+                permute = np.array(list(set(np.concatenate(pmt))))
+                if any([rem[x] != cur[x] for x in range(len(rem))]):
+                    cur = rem
+                    print(pats, cur, c, len(permute)) #, confusion_matrix(y, preds), confusion_matrix(y, negpreds))
+                #if cur != 0:
+                #    permute = np.nonzero(X[remaining[0]])[0]
+                #else:
+                #    permute = np.nonzero(X[remainingneg[0]])[0]
+                curlens, startc = [len(p) for p in pats], c
+                while all([curlens[k] == len(pats[k]) for k in range(len(pats))]) and startc + self.maxcombs > c:
+                    rnd.shuffle(permute)
                     for i in range(0, len(permute), degree):
-                        calc_permute(permute[i:i+degree], pats, negpats)
+                        calc_permute(permute[i:i+degree], pats)
                     c += 1
                 if startc + self.maxcombs <= c: break
                 #    cantfind.add(remaining[0] if cur != 0 else remainingneg[0])
         else:
             for comb in itertools.combinations(permute, degree):
-                calc_permute(comb, pats, negpats)
+                calc_permute(comb, pats)
         #print(pats, negpats)
-        eqs = ([x[2] for x in pats], [x[2] for x in negpats])
-        preds = self._predict(X, eqs[0])
-        #cm = conf_mat(y, preds)
-        negpreds = ~self._predict(X, eqs[1])
-        #cmneg = conf_mat(y, negpreds)
-        preferpos = accuracy_score(y, preds) >= accuracy_score(y, negpreds)
+        finaleqs = []
+        for k in range(len(pats)):
+            eqs = [x[2] for x in pats[k]]
+            preds = self._predict(X, eqs)
+            finaleqs.append((f1_score(y == classes[k], preds, pos_label=True), classes[k], eqs))
         #print(minmatch, accuracy_score(y, preds), accuracy_score(y, negpreds), pats, negpats)
         #print(preferpos, cm, mcc(cm), cmneg, mcc(cmneg))
-        return (preferpos, eqs[0], eqs[1])
+        finaleqs.sort(reverse=True)
+        print(finaleqs)
+        return finaleqs
     def _predict(self, X, eqs):
         sz = len(X)
         out = np.zeros(sz, dtype=bool)
@@ -554,6 +925,21 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             out = np.logical_or(out, col)
         return out
     def predict(self, X):
+        """ LAD classifier implementation of prediction.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            The input samples.
+
+        Returns
+        -------
+        y : ndarray, shape (n_samples,)
+            The label for each sample is the label of the last
+            matching pattern found during fit.  The final label
+            is computed as all remaining samples which did not
+            yet receive a label.
+        """
         check_is_fitted(self, attributes='booleqs_')
         X = check_array(X, dtype=np.float32, accept_sparse="csr")
         if issparse(X) and (X.indices.dtype != np.intc or
@@ -565,40 +951,29 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                              "match the input. Model n_features is %s and "
                              "input n_features is %s "
                              % (len(self.binarizer_values_), X.shape[1]))
-        X_ = self.postbinarize(X, self.binarizer_values_)
-        if type(self.booleqs_) is list:
+        X_ = LADClassifier.postbinarize(X, self.binarizer_values_)
+        if type(self.n_classes_) is list:
             out = np.zeros((len(X), len(self.booleqs_)), dtype=self.outtype_)
             for n, booleqs in enumerate(self.booleqs_):
                 cumpreds = np.zeros(len(X), dtype=np.bool_)
-                for k, v in booleqs.items():
-                    if len(v) == 0:
-                        remain = k
-                        continue
-                    elif v[0]:
-                        preds = self._predict(X_, v[1])
-                    else:
-                        preds = ~self._predict(X_, v[2])
-                    out[preds == True, n] = k
+                for k in booleqs[-2::-1]:
+                    preds = self._predict(X_, k[2])
+                    out[preds, n] = k[1]
                     cumpreds = np.logical_or(preds, cumpreds)
-                out[cumpreds == False, n] = remain
+                out[~cumpreds, n] = booleqs[-1][1]
         else:
             out = np.zeros(len(X), dtype=self.outtype_)
             cumpreds = np.zeros(len(X), dtype=np.bool_)
-            for k, v in self.booleqs_.items():
-                if len(v) == 0:
-                    remain = k
-                    continue
-                elif v[0]:
-                    preds = self._predict(X_, v[1])
-                else:
-                    preds = ~self._predict(X_, v[2])
-                out[preds == True] = k
+            for k in self.booleqs_[-2::-1]:
+                preds = self._predict(X_, k[2])
+                out[preds] = k[1]
                 cumpreds = np.logical_or(preds, cumpreds)
-            out[cumpreds == False] = remain
+            out[~cumpreds] = self.booleqs_[-1][1]
         return out
     def score(self, X, y, sample_weight=None):
         preds = self.predict(X)
         #from sklearn.metrics import confusion_matrix #, matthews_corrcoef, cohen_kappa_score, balanced_accuracy_score #with adjusted=True
+        print(confusion_matrix(y, preds))
         #cm = confusion_matrix(y, preds)
         #print(cm)
         #print(extended_conf_mat(cm, partial=True), precision(cm), fbetascore(cm, 1), fbetascore(cm, 1), mcc(cm), informedness(cm), kappa(cm))
@@ -607,9 +982,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
     def format_booleqs(self):
         check_is_fitted(self, attributes='booleqs_')
         def do_format_booleqs(booleqs):
-            return {k:(v[0], [[self.featnames_[x[0]][x[1]] for x in y] for y in v[1]],
-                    [[self.featnames_[x[0]][x[1]] for x in y] for y in v[2]]) if len(v) != 0 else () for k, v in booleqs.items()}
-        if type(self.booleqs_) is list:
+            return {k[1]:(k[0], [[self.featnames_[x[0]][x[1]] for x in y] for y in k[2]]) for k in booleqs}
+        if type(self.n_classes_) is list:
             return [do_format_booleqs(x) for x in self.booleqs_]
         else:
             return do_format_booleqs(self.booleqs_)
@@ -617,7 +991,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         return {'degree': self.degree, 'random': self.random,
                 'maxcombs': self.maxcombs, 'threshold_pct': self.threshold_pct,
                 'minmatch_pct': self.minmatch_pct, 'feature_names': self.feature_names,
-                'binarizer_params':self.binarizer_params, 'remaining_label': self.remaining_label}
+                'binarizer_params':self.binarizer_params, 'random_state':self.random_state}
                 #'mutual_exclusions':self.mutual_exclusions}
     def set_params(self, **params):
         if 'degree' in params: self.degree = params['degree']
@@ -627,6 +1001,6 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         if 'minmatch_pct' in params: self.minmatch_pct = params['minmatch_pct']
         if 'feature_names' in params: self.feature_names = params['feature_names']
         if 'binarizer_params' in params: self.binarizer_params = params['binarizer_params']
-        if 'remaining_label' in params: self.remaining_label = params['remaining_label']
+        if 'random_state' in params: self.random_state = params['random_state']
         #if 'mutual_exclusions' in params: self.mutual_exclusions = params['mutual_exclusions']
         return self
