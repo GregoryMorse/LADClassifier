@@ -1478,6 +1478,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             out[~cumpreds] = self.booleqs_[-1][1]
         return out
     def score(self, X, y, sample_weight=None):
+        """Return mean classification accuracy on the supplied test data."""
         preds = self.predict(X)
         return accuracy_score(y, preds, sample_weight=sample_weight)
     def format_booleqs(self):

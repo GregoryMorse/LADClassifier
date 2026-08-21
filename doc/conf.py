@@ -19,7 +19,6 @@ release = __version__
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
-    'sphinx.ext.intersphinx',
     'sphinx.ext.viewcode',
     'numpydoc',
     'sphinx_gallery.gen_gallery',
@@ -28,7 +27,13 @@ extensions = [
 autosummary_generate = True
 autodoc_default_options = {
     'members': True,
-    'inherited-members': True,
+    'exclude-members': ','.join([
+        'get_metadata_routing',
+        'set_fit_request',
+        'set_inverse_transform_request',
+        'set_score_request',
+        'set_transform_request',
+    ]),
 }
 numpydoc_show_class_members = False
 
@@ -39,14 +44,6 @@ html_static_path = ['_static']
 html_css_files = ['css/project-template.css']
 html_title = 'LADClassifier documentation'
 htmlhelp_basename = 'LADClassifierdoc'
-
-intersphinx_mapping = {
-    'python': ('https://docs.python.org/3', None),
-    'numpy': ('https://numpy.org/doc/stable/', None),
-    'scipy': ('https://docs.scipy.org/doc/scipy/', None),
-    'matplotlib': ('https://matplotlib.org/stable/', None),
-    'sklearn': ('https://scikit-learn.org/stable/', None),
-}
 
 sphinx_gallery_conf = {
     'examples_dirs': '../examples',
