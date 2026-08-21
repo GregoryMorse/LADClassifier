@@ -1,36 +1,74 @@
-.. -*- mode: rst -*-
+LADClassifier
+=============
 
-|Travis|_ |AppVeyor|_ |Codecov|_ |CircleCI|_ |ReadTheDocs|_
+``LADClassifier`` implements Logical Analysis of Data (LAD) for Python's
+scikit-learn ecosystem. LAD constructs Boolean patterns from discretized
+features, producing rules that can be inspected and explained rather than
+only opaque class scores.
 
-.. |Travis| image:: https://travis-ci.org/scikit-learn-contrib/project-template.svg?branch=master
-.. _Travis: https://travis-ci.org/scikit-learn-contrib/project-template
+This release reconciles the original public project with the newer classifier
+used by the trader project. It retains the 2019 public binarization helpers
+while exposing the newer transformer, feature grouping, multiclass, and
+Boolean-equation APIs from one canonical package.
 
-.. |AppVeyor| image:: https://ci.appveyor.com/api/projects/status/coy2qqaqr1rnnt5y/branch/master?svg=true
-.. _AppVeyor: https://ci.appveyor.com/project/glemaitre/project-template
+Public API
+----------
 
-.. |Codecov| image:: https://codecov.io/gh/scikit-learn-contrib/project-template/branch/master/graph/badge.svg
-.. _Codecov: https://codecov.io/gh/scikit-learn-contrib/project-template
+The ``lad`` package exports:
 
-.. |CircleCI| image:: https://circleci.com/gh/scikit-learn-contrib/project-template.svg?style=shield&circle-token=:circle-token
-.. _CircleCI: https://circleci.com/gh/scikit-learn-contrib/project-template/tree/master
+* ``LADClassifier``
+* ``DiscretizingTransformer``
+* ``FeatureGroup``
+* ``BooleanEquationClassifier``
+* ``plot_confusion_matrix``
 
-.. |ReadTheDocs| image:: https://readthedocs.org/projects/sklearn-template/badge/?version=latest
-.. _ReadTheDocs: https://sklearn-template.readthedocs.io/en/latest/?badge=latest
+The original ``LADClassifier.binarizer``, ``binarize``, ``binarizeall``,
+``postbinarize``, and ``binarizecompare`` helpers remain available for
+existing callers.
 
-LADClassifier - A Logical Analysis of Data classifier for Python's scikit-learn
-===============================================================================
+Installation
+------------
 
-.. _LADClassifier: https://github.com/GregoryMorse/LADClassifier
+Clone the repository and install it in editable mode while developing::
 
-**LADClassifier** is a Logical Analysis of Data classifier for Python's scikit-learn_.
+    git clone https://github.com/GregoryMorse/LADClassifier.git
+    cd LADClassifier
+    python -m pip install -e .
 
-It allows for Boolean equations of features to be found in a data set.
-This provides a human readable and understandable pattern which has
-practical use.  As well the classifier can often outperform other
-classifiers and has its own resilience to over fitting in some contexts.
+Numba acceleration and plotting are optional::
 
-.. _documentation: https://github.com/GregoryMorse/LADClassifier/blob/master/doc/quick_start.rst
+    python -m pip install -e ".[accelerate,plot]"
 
-Refer to the documentation_ to learn how to use the classifier.
+Run the tests with::
 
-*Thank you for any bug or issue reports or pull requests or any other contributions LADClassifier project!*
+    python -m pip install -e ".[tests]"
+    python -m pytest
+
+Quick start
+-----------
+
+::
+
+    import numpy as np
+    from lad import LADClassifier
+
+    X = np.array([
+        [0.0, 0.1],
+        [0.2, 0.1],
+        [0.8, 0.9],
+        [1.0, 0.8],
+    ])
+    y = np.array([0, 0, 1, 1])
+
+    classifier = LADClassifier(random_state=0)
+    classifier.fit(X, y)
+    predictions = classifier.predict(X)
+
+For the longer walkthrough, see `the quick-start guide
+<doc/quick_start.rst>`_. Bug reports and contributions are welcome through
+the `GitHub repository <https://github.com/GregoryMorse/LADClassifier>`_.
+
+License
+-------
+
+LADClassifier is distributed under the MIT License.

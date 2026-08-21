@@ -21,7 +21,12 @@ URL = 'https://github.com/GregoryMorse/LADClassifier'
 LICENSE = 'MIT'
 DOWNLOAD_URL = 'https://github.com/GregoryMorse/LADClassifier'
 VERSION = __version__
-INSTALL_REQUIRES = ['numpy', 'scipy', 'scikit-learn']
+INSTALL_REQUIRES = [
+    'numpy>=1.24',
+    'scipy>=1.10',
+    'scikit-learn>=1.3',
+    'pysettrie>=1.0',
+]
 CLASSIFIERS = ['Intended Audience :: Science/Research',
                'Intended Audience :: Developers',
                'License :: OSI Approved',
@@ -32,10 +37,12 @@ CLASSIFIERS = ['Intended Audience :: Science/Research',
                'Operating System :: POSIX',
                'Operating System :: Unix',
                'Operating System :: MacOS',
-               'Programming Language :: Python :: 2.7',
-               'Programming Language :: Python :: 3.5',
-               'Programming Language :: Python :: 3.6',
-               'Programming Language :: Python :: 3.7']
+               'Programming Language :: Python :: 3',
+               'Programming Language :: Python :: 3 :: Only',
+               'Programming Language :: Python :: 3.11',
+               'Programming Language :: Python :: 3.12',
+               'Programming Language :: Python :: 3.13',
+               'Programming Language :: Python :: 3.14']
 EXTRAS_REQUIRE = {
     'tests': [
         'pytest',
@@ -46,7 +53,9 @@ EXTRAS_REQUIRE = {
         'sphinx_rtd_theme',
         'numpydoc',
         'matplotlib'
-    ]
+    ],
+    'accelerate': ['numba>=0.58'],
+    'plot': ['matplotlib>=3.7'],
 }
 
 setup(name=DISTNAME,
