@@ -104,3 +104,19 @@ def test_discretizing_transformer_round_trip():
     )
     transformed = transformer.fit_transform(features, labels)
     assert transformed.shape[0] == features.shape[0]
+
+
+def test_estimator_values_round_trip_through_public_postbinarize():
+    features = np.array(
+        [[0.0, 0.1], [0.2, 0.8], [0.8, 0.2], [1.0, 0.9]],
+        dtype=float,
+    )
+    labels = np.array([0, 0, 1, 1])
+    classifier = lad.LADClassifier(
+        degree=2,
+        random=False,
+        binarizer_params={'method': 'equaldistribution', 'divisions': 2},
+    ).fit(features, labels)
+    expected = classifier.discretizer_.transform(features)
+    actual = classifier.postbinarize(features, classifier.binarizer_values_)
+    np.testing.assert_array_equal(actual, expected)

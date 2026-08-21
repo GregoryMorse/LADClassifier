@@ -213,6 +213,32 @@ def postbinarize(X, binarizer_values):
     for index in range(X.shape[1]):
         if binarizer_values[index] is None:
             conditions.append(X[:, index])
+        elif 'cut_points' in binarizer_values[index]:
+            # The estimator transformer stores its fitted schema under
+            # ``cut_points``. Reproduce that transformer's searchsorted
+            # semantics so persisted estimator values can be reused through
+            # this public API without an in-memory transformer instance.
+            values = binarizer_values[index]
+            cut_points = values['cut_points']
+            if len(cut_points) <= 1:
+                converted = np.zeros(len(X), dtype=np.bool_)
+            else:
+                converted = np.searchsorted(
+                    [point[0] for point in cut_points[1:]],
+                    X[:, index],
+                    side='right',
+                )
+            if values['binarymode']:
+                if len(cut_points) <= 1:
+                    conditions.append(converted)
+                else:
+                    one_hot = np.zeros(
+                        (len(cut_points), len(X)), dtype=np.bool_
+                    )
+                    one_hot[(converted, np.arange(len(X)))] = True
+                    conditions.extend(one_hot)
+            else:
+                conditions.append(converted)
         elif binarizer_values[index]['binarymode']:
             conditions.extend(
                 binarizer(
