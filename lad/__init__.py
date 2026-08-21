@@ -7,6 +7,13 @@ from ._lad import (
 )
 
 from ._version import __version__
+from .binarization import (
+    binarize,
+    binarizeall,
+    binarizecompare,
+    binarizer,
+    postbinarize,
+)
 
 __all__ = [
     'LADClassifier',
@@ -14,5 +21,10 @@ __all__ = [
     'FeatureGroup',
     'BooleanEquationClassifier',
     'plot_confusion_matrix',
+    'binarizer',
+    'binarize',
+    'binarizeall',
+    'postbinarize',
+    'binarizecompare',
     '__version__',
 ]

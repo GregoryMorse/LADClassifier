@@ -1,11 +1,4 @@
-"""
-This module contains the LAD classifier implementation
-"""
-"""Logical Analysis of Data classifier (primary production model candidate).
-
-This is the complete pre-refactor LAD implementation, relocated without
-algorithmic changes so it can be calibrated before modernization.
-"""
+"""Logical Analysis of Data classifiers and feature transformers."""
 
 try:
     import numba
@@ -24,6 +17,18 @@ except ImportError:  # Numba is an acceleration, not a semantic requirement.
     numba = _NumbaFallback()
 import numpy as np
 import settrie
+from .binarization import (
+    binarize as _public_binarize,
+    binarizeall as _public_binarizeall,
+    binarizecompare as _public_binarizecompare,
+    binarizer as _public_binarizer,
+    postbinarize as _public_postbinarize,
+)
+from ._intervals import (
+    extended_gray_code as _extended_gray_code,
+    update_prevalence as _update_prevalence,
+    upper_prevalence as _upper_prevalence,
+)
 from sklearn.base import BaseEstimator, ClassifierMixin, MultiOutputMixin, TransformerMixin
 from sklearn.utils.validation import check_is_fitted #check_X_y
 from sklearn.utils.multiclass import unique_labels
@@ -347,7 +352,6 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
             #hist_ranges[f:f+feature_batch_size] = Xcur[s[[0, -1]], np.arange(Xcur.shape[1])] #+/-len(s)//max_bins
             for (train, test) in folds: train_test.append((Xcur[train,:], y[train], Xcur[test,:], y[test]))
             cur_features = train_test[0][0].shape[1]
-            print(f, X.shape)
             for hist_bins in range(n_classes, max_bins):
                 train_hist.append(np.zeros((n_classes, n_splits, cur_features, hist_bins)))
                 train_counts.append(np.zeros((n_classes, n_splits)))
@@ -365,9 +369,6 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
         train_score = np.concatenate(train_score, axis=1)
         test_score = np.concatenate(test_score, axis=1)
         smooth_test_score = np.concatenate(smooth_test_score, axis=1)
-        best_test_scores = smooth_test_score[np.argmax(smooth_test_score, axis=0),np.arange(smooth_test_score.shape[1])]
-        for i in np.argsort(best_test_scores)[::-1][:200]:
-            print(feat_names[i], np.max(best_test_scores[i]))
         #print(train_score, test_score)
         ranges = np.linspace(hist_range[0], hist_range[1], best_bins+n_classes+1)
         ranges[0] = -np.inf
@@ -943,49 +944,33 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         self._estimator_type = 'classifier' #needed for stratified k-folds in GridSearchCV
     #def _get_tags(self): return {'poor_score':True,'multioutput':True}
 
-    """Paper test with simple and general but inefficient code as a proof of concept.
-    It shows that the paper example works with a series of assertions for its 3 algorithms.
-    Paper: https://www.sciencedirect.com/science/article/pii/S0166218X05003161
-    """
+    binarizer = staticmethod(_public_binarizer)
+    binarize = staticmethod(_public_binarize)
+    binarizeall = staticmethod(_public_binarizeall)
+    postbinarize = staticmethod(_public_postbinarize)
+    binarizecompare = staticmethod(_public_binarizecompare)
     @staticmethod
     def _testpaper():
+        """Validate the canonical code against the paper's worked example.
+
+        The assertions cover all three algorithms and all 20 prevalence
+        matrices. Paper: https://doi.org/10.1016/j.dam.2005.03.032
+        """
 
         #paper example
         def calc_PI_V0(X, n=None):
-            if n is None: n = range(len(X.shape))
-            H = np.array(X)
-            def sum_func(a):
-                for j in range(len(a) - 1-1, -1, -1):
-                    a[j] = a[j] + a[j+1]
-                return a
-            for i in n:
-                #Ni, Nk = tuple([slice(None, None, None)] * i), tuple([slice(None, None, None)] * (len(H.shape)-1 - i-1))
-                #for j in range(H.shape[i]-1-1, -1, -1): H[Ni + np.s_[j,] + Nk] += H[Ni + np.s_[j+1,] + Nk]
-                H = np.apply_along_axis(sum_func, i, H)
-            return H
-        def extended_gray_code(K):
-            codes, istar, V, T = list(), 0, np.array(K), np.repeat(-1, len(K))
-            while True:
-                codes.append((np.array(V), istar, np.array(T)))
-                VT = V + T
-                S = np.nonzero((VT >= 0) & (VT <= K))[0]
-                if len(S) == 0: break
-                istar = np.max(S)
-                V[istar] = V[istar] + T[istar]
-                T[istar+1:] = -T[istar+1:]
-                #print(V)
-            return codes
+            return _upper_prevalence(X, axes=n)
+
+        extended_gray_code = _extended_gray_code
+
         def calc_PI_VI(Vistar, Vprimeistar, istar, Tistar, PiVi):
-            PiVprime = np.array(PiVi) #np.zeros(X.shape, dtype=np.uint32)
-            def diff_func(a):
-                a[Vistar+1:] -= a[Vistar]
-                a[:Vistar+1] += a[Vprimeistar]
-                return a
-            def diff_funcneg(a):
-                a[:Vistar] -= a[Vistar]
-                a[Vistar:] += a[Vprimeistar]
-                return a
-            return np.apply_along_axis(diff_func if Tistar == 1 else diff_funcneg, istar, PiVprime)
+            return _update_prevalence(
+                np.array(PiVi, copy=True),
+                Vistar,
+                Vprimeistar,
+                istar,
+                Tistar,
+            )
         #paper has columns as axis 0 and rows as axis 1
         Xpaperpts = [tuple(np.flip(x)) for x in [(0, 4), (1, 2), (1, 3), (2, 2), (2, 3), (3, 0)]]
         Xpapercalc = np.zeros(np.flip((4, 5), 0), dtype=np.uint32)
@@ -1192,111 +1177,18 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         def prec_penalty(precision, featpct): #reduce precision based on number of features
             a = self.penalty_value
             return (a ** (1-featpct) - 1) / (a-1) * precision #exponential between 0 and 1: (a^x-1)/(a-1) where higher a has higher decay
-        #@numba.njit
-        def sum_func(a):
-            for j in range(len(a) - 1-1, -1, -1):
-                a[j] = a[j] + a[j+1]
-            return a
-        @numba.njit
-        def calc_PI_V0_axis(H, Ni, Nk, s_):
-            for ii in np.ndindex(Ni):
-                for kk in np.ndindex(Nk):
-                    a = H[ii + s_ + kk]
-                    for j in range(len(a) - 1-1, -1, -1):
-                        a[j] = a[j] + a[j+1]
         def calc_PI_V0(X): #construct PI(V_0)
-            for i in range(X.ndim):
-                #calc_PI_V0_axis(X, X.shape[:i], X.shape[i+1:], np.s_[:,])
-                #Ni, Nk = tuple([slice(None, None, None)] * i), tuple([slice(None, None, None)] * (len(X.shape)-1 - i-1))
-                #for j in range(X.shape[i]-1-1, -1, -1): X[Ni + np.s_[j,] + Nk] += X[Ni + np.s_[j+1,] + Nk]
-                view = np.flip(X.swapaxes(0, i), 0)
-                np.cumsum(view, 0, out=view)
-                #X = np.apply_along_axis(sum_func, i, X)
-            return X
+            return _upper_prevalence(X)
         def mod_gray_code(K):
-            codes, istar, V, T = list(), 0, np.array(K), np.repeat(-1, len(K))
-            while True:
-                codes.append((np.array(V), istar, np.array(T)))
-                VT = V + T
-                S = np.nonzero((VT >= 0) & (VT <= K))[0]
-                if len(S) == 0: break
-                istar = np.max(S)
-                V[istar] = V[istar] + T[istar]
-                #T[istar+1:] = -T[istar+1:]
-                #print(V)
-            return codes
-        def extended_gray_code(K):
-            codes, istar, V, T = list(), 0, np.array(K), np.repeat(-1, len(K))
-            while True:
-                codes.append((np.array(V), istar, np.array(T)))
-                VT = V + T
-                S = np.nonzero((VT >= 0) & (VT <= K))[0]
-                if len(S) == 0: break
-                istar = np.max(S)
-                V[istar] = V[istar] + T[istar]
-                T[istar+1:] = -T[istar+1:]
-                #print(V)
-            return codes
-        #@numba.njit
-        def diff_func(a, Vistar, Vprimeistar):
-            a[Vistar+1:] -= a[Vistar]
-            a[:Vistar+1] += a[Vprimeistar]
-            return a
-        #@numba.njit
-        def diff_funcneg(a, Vistar, Vprimeistar):
-            a[:Vistar] -= a[Vistar]
-            a[Vistar:] += a[Vprimeistar]
-            return a
-        """
-        preidxs = list()
-        for i in range(degree):
-            newidx = numba.typed.List()
-            Ni, Nk = tuple([2] * i), tuple([2] * (degree-1 - i-1))
-            for ii in np.ndindex(Ni):
-                for kk in np.ndindex(Nk):
-                    newidx.append(ii + np.s_[:,] + kk)
-            preidxs.append(newidx)
-        """
-        @numba.njit #(parallel=True)
-        def calc_PI_VI_axis(H, idxs, Tistar, Vistar, Vprimeistar): #Ni, Nk, s_,
-            if Tistar == 1:
-                #for ii in np.ndindex(Ni):
-                #    for kk in np.ndindex(Nk):
-                #        a = H[ii + s_ + kk]
-                for x in range(len(idxs)):
-                    a = H[idxs[x]]
-                    a[Vistar+1:] -= a[Vistar]
-                    a[:Vistar+1] += a[Vprimeistar]
-            else:
-                for x in range(len(idxs)):
-                    a = H[idxs[x]]
-                    a[:Vistar] -= a[Vistar]
-                    a[Vistar:] += a[Vprimeistar]
+            return _extended_gray_code(K)
         def calc_PI_VI(Vistar, Vprimeistar, istar, Tistar, PiVi):
-            #calc_PI_VI_axis(PiVi, preidxs[istar], Tistar, np.int64(Vistar), Vprimeistar)
-            #calc_PI_VI_axis(PiVi, PiVi.shape[:istar], PiVi.shape[istar+1:], np.s_[:,], Tistar, np.int64(Vistar), Vprimeistar)
-            #return PiVi
-            #return np.apply_along_axis(diff_func if Tistar == 1 else diff_funcneg, istar, PiVi, Vistar, Vprimeistar)
-            #Ni, Nk = tuple([slice(None, None, None)] * istar), tuple([slice(None, None, None)] * (len(PiVi.shape)-1 - istar-1))
-            view = np.swapaxes(PiVi, 0, istar)
-            if Tistar == 1:
-                #optimized for binary shaped dimensions
-                #if Vistar != 1: PiVi[Ni + np.s_[1,] + Nk] -= PiVi[Ni + np.s_[Vistar,] + Nk]
-                #PiVi[Ni + np.s_[0,] + Nk] += PiVi[Ni + np.s_[Vprimeistar,] + Nk]
-                #if Vistar == 1: PiVi[Ni + np.s_[Vistar,] + Nk] += PiVi[Ni + np.s_[Vprimeistar,] + Nk]
-                #for j in range(Vistar+1, PiVi.shape[istar]): PiVi[Ni + np.s_[j,] + Nk] -= PiVi[Ni + np.s_[Vistar,] + Nk]
-                #for j in range(Vistar+1): PiVi[Ni + np.s_[j,] + Nk] += PiVi[Ni + np.s_[Vprimeistar,] + Nk]
-                view[Vistar+1:] -= view[Vistar]
-                view[:Vistar+1] += view[Vprimeistar]
-            else:
-                #if Vistar != 0: PiVi[Ni + np.s_[0,] + Nk] -= PiVi[Ni + np.s_[Vistar,] + Nk]
-                #if Vistar == 0: PiVi[Ni + np.s_[Vistar,] + Nk] += PiVi[Ni + np.s_[Vprimeistar,] + Nk]
-                #PiVi[Ni + np.s_[1,] + Nk] += PiVi[Ni + np.s_[Vprimeistar,] + Nk]
-                #for j in range(Vistar): PiVi[Ni + np.s_[j,] + Nk] -= PiVi[Ni + np.s_[Vistar,] + Nk]
-                #for j in range(Vistar, PiVi.shape[istar]): PiVi[Ni + np.s_[j,] + Nk] += PiVi[Ni + np.s_[Vprimeistar,] + Nk]
-                view[:Vistar] -= view[Vistar]
-                view[Vistar:] += view[Vprimeistar]
-            return PiVi
+            return _update_prevalence(
+                PiVi,
+                Vistar,
+                Vprimeistar,
+                istar,
+                Tistar,
+            )
         @numba.njit
         def subpat(a, b): #for two sorted lists, -1 no relation, 0 if a contains b, 1 if b contains a, 2 if a==b
             i1, i2 = len(a) - 1, len(b) - 1
@@ -1478,7 +1370,6 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     calc_permute(permute[i:i+degree], pats, pattrie)
             cur, c = [len(vals[k]) for k in range(len(vals))], 0
             #cantfind = set()
-            print(cur)
             while True:
                 pmt, rem, falsethresh = list(), list(), list()
                 for k in range(len(vals)):
@@ -1500,7 +1391,6 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 permute = np.array(list(set(np.concatenate(pmt))))
                 if any([rem[x] != cur[x] for x in range(len(rem))]):
                     cur = rem
-                    print(cur, c, len(permute)) #, pats, confusion_matrix(y, preds), confusion_matrix(y, negpreds))
                 #if cur != 0:
                 #    permute = np.nonzero(X[remaining[0]])[0]
                 #else:
@@ -1526,7 +1416,6 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         #print(minmatch, accuracy_score(y, preds), accuracy_score(y, negpreds), pats, negpats)
         #print(preferpos, cm, mcc(cm), cmneg, mcc(cmneg))
         finaleqs.sort(reverse=True)
-        print(finaleqs)
         return finaleqs
     def _predict(self, X, eqs):
         sz = len(X)
@@ -1590,12 +1479,6 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         return out
     def score(self, X, y, sample_weight=None):
         preds = self.predict(X)
-        #from sklearn.metrics import confusion_matrix #, matthews_corrcoef, cohen_kappa_score, balanced_accuracy_score #with adjusted=True
-        print(confusion_matrix(y, preds))
-        #cm = confusion_matrix(y, preds)
-        #print(cm)
-        #print(extended_conf_mat(cm, partial=True), precision(cm), fbetascore(cm, 1), fbetascore(cm, 1), mcc(cm), informedness(cm), kappa(cm))
-        #return mcc(cm)
         return accuracy_score(y, preds, sample_weight=sample_weight)
     def format_booleqs(self):
         check_is_fitted(self) #, attributes='booleqs_')
@@ -1951,25 +1834,3 @@ class BooleanEquationClassifier:
         if 'isPositive' in params: self.isPositive = params['isPositive']
         if 'onesided' in params: self.onesided = params['onesided']
         return self
-
-
-# Preserve the public preprocessing helpers shipped by LADClassifier 0.0.1.
-# The production classifier now delegates fitting to DiscretizingTransformer,
-# but existing callers still use these methods directly.
-from ._legacy_2019 import LADClassifier as _LegacyLADClassifier2019
-
-for _legacy_helper_name in (
-    "binarizer",
-    "binarize",
-    "binarizeall",
-    "postbinarize",
-    "binarizecompare",
-):
-    setattr(
-        LADClassifier,
-        _legacy_helper_name,
-        staticmethod(getattr(_LegacyLADClassifier2019, _legacy_helper_name)),
-    )
-
-del _legacy_helper_name
-del _LegacyLADClassifier2019
