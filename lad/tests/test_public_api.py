@@ -120,3 +120,45 @@ def test_estimator_values_round_trip_through_public_postbinarize():
     expected = classifier.discretizer_.transform(features)
     actual = classifier.postbinarize(features, classifier.binarizer_values_)
     np.testing.assert_array_equal(actual, expected)
+
+
+def test_multioutput_fit_uses_each_outputs_own_discretized_matrix(monkeypatch):
+    features = np.array(
+        [[0.0, 0.1], [0.2, 0.8], [0.8, 0.2], [1.0, 0.9]],
+        dtype=float,
+    )
+    labels = np.column_stack(([0, 0, 1, 1], [0, 1, 0, 1]))
+    fitted_matrices = []
+
+    def capture_fit(self, transformed, output, classes, bounds):
+        fitted_matrices.append(np.array(transformed, copy=True))
+        return [(0.0, value, []) for value in classes]
+
+    monkeypatch.setattr(lad.LADClassifier, '_fit', capture_fit)
+    classifier = lad.LADClassifier(
+        degree=1,
+        random=False,
+        binarizer_params={'method': 'minimumdifferentiated'},
+    ).fit(features, labels)
+
+    assert len(fitted_matrices) == labels.shape[1]
+    for output, transformed in enumerate(fitted_matrices):
+        np.testing.assert_array_equal(
+            transformed,
+            classifier.discretizer_[output].transform(features),
+        )
+
+
+def test_unmatched_rows_use_training_majority_instead_of_tuple_order():
+    features = np.tile([[0.0], [1.0]], (7, 1))
+    labels = np.repeat(np.array([-2, -1, 1, 1, 1, 2, 1]), 2)
+    classifier = lad.LADClassifier(
+        degree=1,
+        random=False,
+        threshold_pct=1,
+        binarizer_params={'method': 'equaldivisions', 'divisions': 2},
+    ).fit(features, labels)
+    assert classifier.default_class_ == 1
+    np.testing.assert_array_equal(
+        classifier.predict(features), np.ones(len(features))
+    )

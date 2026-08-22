@@ -1123,6 +1123,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             self.n_classes_ = self.classes_.shape[0]
             if self.n_classes_ < 2:
                 raise ValueError("LADClassifier cannot fit data with only 1 class")
+            self.default_class_ = self.classes_[np.argmax(np.bincount(idxs))]
             self.discretizer_ = DiscretizingTransformer(
                 self.binarizer_params, self.random_state, self.feature_names
             )
@@ -1139,8 +1140,10 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             self.n_outputs_ = y.shape[1]
             self.classes_ = list()
             self.n_classes_ = list()
+            self.default_class_ = list()
             self.booleqs_ = list()
             self.discretizer_ = list()
+            transformed_outputs = list()
             self.featnames_ = list()
             self.binarizer_values_ = list()
             self.bounds_ = list()
@@ -1150,10 +1153,14 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     raise ValueError("LADClassifier cannot fit an output with only 1 class")
                 self.classes_.append(classes_k)
                 self.n_classes_.append(classes_k.shape[0])
+                self.default_class_.append(
+                    classes_k[np.argmax(np.bincount(idxs))]
+                )
                 self.discretizer_.append(DiscretizingTransformer(
                     self.binarizer_params, self.random_state, self.feature_names
                 ))
                 condarr = self.discretizer_[k].fit_transform(X, y[:, k])
+                transformed_outputs.append(condarr)
                 binarizer_values = self.discretizer_[k].binarizer_values_
                 self.binarizer_values_.append(binarizer_values)
                 self.bounds_.append(self.discretizer_[k].binarizer_bounds(X))
@@ -1165,7 +1172,12 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 #self.featnames_.append(LADClassifier.binarizer_feat_names(binarizer_values, self.feature_names))
                 self.booleqs_.append(dict()) #(prefer positive, positive patterns, negative patterns)
             for k in range(self.n_outputs_):
-                self.booleqs_[k] = self._fit(condarr, y[:, k], self.classes_[k], self.bounds_[k])
+                self.booleqs_[k] = self._fit(
+                    transformed_outputs[k],
+                    y[:, k],
+                    self.classes_[k],
+                    self.bounds_[k],
+                )
         return self
     def _fit(self, X, y, classes, curbounds): #in DNF, if want CNF, can negate X and y per DeMorgan's law?
         #print(X.shape[1])
@@ -1439,10 +1451,9 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         Returns
         -------
         y : ndarray, shape (n_samples,)
-            The label for each sample is the label of the last
-            matching pattern found during fit.  The final label
-            is computed as all remaining samples which did not
-            yet receive a label.
+            The label for each sample is selected by the highest-scoring
+            matching class pattern. Rows without a matching pattern use the
+            most prevalent class observed during fit.
         """
         check_is_fitted(self) #, attributes='booleqs_')
         X = check_array(X, dtype=[np.float64, np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64, np.float16, np.float32, np.bool_], accept_sparse=False) #accept_sparse="csr"
@@ -1460,22 +1471,17 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             for n, booleqs in enumerate(self.booleqs_):
                 X_ = self.discretizer_[n].transform(X)
                 #X_ = LADClassifier.postbinarize(X, self.binarizer_values_[n])
-                cumpreds = np.zeros(len(X), dtype=np.bool_)
-                for k in booleqs[-2::-1]:
+                out[:, n] = self.default_class_[n]
+                for k in booleqs[::-1]:
                     preds = self._predict(X_, k[2])
                     out[preds, n] = k[1]
-                    cumpreds = np.logical_or(preds, cumpreds)
-                out[~cumpreds, n] = booleqs[-1][1]
         else:
             X_ = self.discretizer_.transform(X)
             #X_ = LADClassifier.postbinarize(X, self.binarizer_values_)
-            out = np.zeros(len(X), dtype=self.outtype_)
-            cumpreds = np.zeros(len(X), dtype=np.bool_)
-            for k in self.booleqs_[-2::-1]:
+            out = np.full(len(X), self.default_class_, dtype=self.outtype_)
+            for k in self.booleqs_[::-1]:
                 preds = self._predict(X_, k[2])
                 out[preds] = k[1]
-                cumpreds = np.logical_or(preds, cumpreds)
-            out[~cumpreds] = self.booleqs_[-1][1]
         return out
     def score(self, X, y, sample_weight=None):
         """Return mean classification accuracy on the supplied test data."""
