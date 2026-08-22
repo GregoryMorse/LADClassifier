@@ -29,6 +29,8 @@ from ._intervals import (
     update_prevalence as _update_prevalence,
     upper_prevalence as _upper_prevalence,
 )
+from ._prime_patterns import prime_patterns as _prime_patterns
+from ._probabilistic import reasonable_degree_bound as _reasonable_degree_bound
 from sklearn.base import BaseEstimator, ClassifierMixin, MultiOutputMixin, TransformerMixin
 from sklearn.utils.validation import check_is_fitted #check_X_y
 from sklearn.utils.multiclass import unique_labels
@@ -912,6 +914,14 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         If RandomState instance, random_state is the random number generator;
         If None, the random number generator is the RandomState instance
         used by np.random.
+    pattern_method : {'alexe_hammer', 'chambon_ppc2_prime',
+                      'chambon_ppc2_strong'}, default='alexe_hammer'
+        Pattern-generation engine. The PPC2 variants implement the exact pure
+        prime-pattern construction of Chambon et al. (2019); ``strong`` removes
+        patterns whose positive cover is strictly dominated.
+    degree_strategy : {'fixed', 'gardy_2022'}, default='fixed'
+        Either use ``degree`` directly or select a bound no larger than it from
+        the Model-M1 probabilities of Gardy, Lardeux, and Saubion (2022).
 
     Attributes
     ----------
@@ -930,7 +940,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
     """
     def __init__(self, degree=4, random=True, maxcombs=100, threshold_pct=1,
                  minmatch_pct=0.001, feature_names=None, binarizer_params=None,
-                 penalty_value=None, random_state=None):
+                 penalty_value=None, random_state=None,
+                 pattern_method='alexe_hammer', degree_strategy='fixed'):
         self.degree = degree
         self.random = random
         self.maxcombs = maxcombs
@@ -940,6 +951,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         self.binarizer_params = binarizer_params
         self.penalty_value = penalty_value #10000000
         self.random_state = random_state
+        self.pattern_method = pattern_method
+        self.degree_strategy = degree_strategy
         #self.mutual_exclusions = mutual_exclusions
         self._estimator_type = 'classifier' #needed for stratified k-folds in GridSearchCV
     #def _get_tags(self): return {'poor_score':True,'multioutput':True}
@@ -1179,7 +1192,86 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     self.bounds_[k],
                 )
         return self
-    def _fit(self, X, y, classes, curbounds): #in DNF, if want CNF, can negate X and y per DeMorgan's law?
+    def _fit(self, X, y, classes, curbounds):
+        if self.pattern_method not in {
+            'alexe_hammer', 'chambon_ppc2_prime', 'chambon_ppc2_strong'
+        }:
+            raise ValueError('Unknown LAD pattern method: ' + str(self.pattern_method))
+        if self.degree_strategy not in {'fixed', 'gardy_2022'}:
+            raise ValueError('Unknown LAD degree strategy: ' + str(self.degree_strategy))
+
+        maximum_degree = min(self.degree, X.shape[1])
+        self.degree_diagnostics_ = []
+        if self.degree_strategy == 'gardy_2022':
+            selected_by_class = []
+            for target_class in classes:
+                positive_count = int(np.sum(y == target_class))
+                negative_count = len(y) - positive_count
+                selected, probabilities = _reasonable_degree_bound(
+                    X.shape[1], maximum_degree, positive_count, negative_count
+                )
+                selected_by_class.append(selected)
+                self.degree_diagnostics_.append({
+                    'class': target_class,
+                    'selected_degree': selected,
+                    'probabilities': [
+                        {
+                            'degree': result.degree,
+                            'log_probability': result.log_probability,
+                        }
+                        for result in probabilities
+                    ],
+                })
+            # One rule set is learned per class. The largest class-wise bound is
+            # conservative: no one-vs-rest problem is forced below its estimate.
+            selected_degree = max(selected_by_class)
+        else:
+            selected_degree = maximum_degree
+        self.selected_degree_ = selected_degree
+
+        if self.pattern_method == 'alexe_hammer':
+            return self._fit_intervals(
+                X, y, classes, curbounds, selected_degree=selected_degree
+            )
+        if self.threshold_pct != 1:
+            raise ValueError(
+                'Chambon PPC2 generates pure patterns and requires threshold_pct=1'
+            )
+        return self._fit_ppc2(
+            X,
+            y,
+            classes,
+            selected_degree,
+            strong_only=self.pattern_method == 'chambon_ppc2_strong',
+        )
+
+    def _fit_ppc2(self, X, y, classes, degree, *, strong_only):
+        """Generate exact PPC2 patterns for every one-vs-rest class."""
+
+        minmatch = int(len(y) * self.minmatch_pct)
+        finaleqs = []
+        for target_class in classes:
+            positive = X[y == target_class]
+            negative = X[y != target_class]
+            equations = []
+            for pattern in _prime_patterns(
+                positive, negative, degree, strong_only=strong_only
+            ):
+                covered = np.logical_and.reduce(
+                    [positive[:, feature] == value for feature, value in pattern]
+                )
+                if int(np.sum(covered)) >= minmatch:
+                    equations.append(pattern)
+            predictions = self._predict(X, equations)
+            finaleqs.append((
+                f1_score(y == target_class, predictions, pos_label=True),
+                target_class,
+                equations,
+            ))
+        finaleqs.sort(key=lambda result: result[0], reverse=True)
+        return finaleqs
+
+    def _fit_intervals(self, X, y, classes, curbounds, *, selected_degree): #in DNF, if want CNF, can negate X and y per DeMorgan's law?
         #print(X.shape[1])
         vals, origsz = list(), len(X)
         for k in classes:
@@ -1358,7 +1450,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 Vistar, Vprimeistar, Tistar = V[istar], nextgcode[0][istar], nextgcode[2][istar]
                 for k in range(lenPiV0s):
                     PiV0s[k] = calc_PI_VI(Vistar, Vprimeistar, istar, Tistar, PiV0s[k])
-        gcodesdict, degree = dict(), min(self.degree, X.shape[1])
+        gcodesdict, degree = dict(), selected_degree
         if np.all(X.shape == 2):
             gcodesdict[tuple([2] * degree)] = mod_gray_code(tuple([1] * degree)) #extended_gray_code(tuple([1] * degree))
         permute = np.arange(X.shape[1], dtype=np.int32)
@@ -1499,7 +1591,9 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         return {'degree': self.degree, 'random': self.random,
                 'maxcombs': self.maxcombs, 'threshold_pct': self.threshold_pct,
                 'minmatch_pct': self.minmatch_pct, 'feature_names': self.feature_names,
-                'binarizer_params':self.binarizer_params, 'random_state':self.random_state}
+                'binarizer_params':self.binarizer_params, 'random_state':self.random_state,
+                'pattern_method':self.pattern_method,
+                'degree_strategy':self.degree_strategy}
                 #'mutual_exclusions':self.mutual_exclusions}
     def set_params(self, **params):
         if 'degree' in params: self.degree = params['degree']
@@ -1510,6 +1604,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         if 'feature_names' in params: self.feature_names = params['feature_names']
         if 'binarizer_params' in params: self.binarizer_params = params['binarizer_params']
         if 'random_state' in params: self.random_state = params['random_state']
+        if 'pattern_method' in params: self.pattern_method = params['pattern_method']
+        if 'degree_strategy' in params: self.degree_strategy = params['degree_strategy']
         #if 'mutual_exclusions' in params: self.mutual_exclusions = params['mutual_exclusions']
         return self
 def test_lad():

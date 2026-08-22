@@ -25,6 +25,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--repeat', type=int, default=3)
     parser.add_argument('--seed', type=int, default=1729)
     parser.add_argument(
+        '--pattern-method',
+        choices=('alexe_hammer', 'chambon_ppc2_prime', 'chambon_ppc2_strong'),
+        default='alexe_hammer',
+    )
+    parser.add_argument(
+        '--degree-strategy',
+        choices=('fixed', 'gardy_2022'),
+        default='fixed',
+    )
+    parser.add_argument(
         '--exhaustive',
         action='store_true',
         help='search every feature combination instead of bounding the search',
@@ -60,6 +70,11 @@ def main() -> None:
             random=not args.exhaustive,
             maxcombs=args.maxcombs,
             random_state=args.seed + repeat,
+            threshold_pct=(
+                1 if args.pattern_method.startswith('chambon_ppc2') else 0.9
+            ),
+            pattern_method=args.pattern_method,
+            degree_strategy=args.degree_strategy,
         )
         started = time.perf_counter()
         classifier.fit(features, target)
@@ -73,6 +88,8 @@ def main() -> None:
         'features': args.features,
         'degree': args.degree,
         'search': 'exhaustive' if args.exhaustive else 'bounded-random',
+        'pattern_method': args.pattern_method,
+        'degree_strategy': args.degree_strategy,
         'maxcombs': args.maxcombs,
         'repeat': args.repeat,
         'seconds': durations,

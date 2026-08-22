@@ -13,6 +13,10 @@ def test_complete_public_api_is_exported():
         'FeatureGroup',
         'BooleanEquationClassifier',
         'plot_confusion_matrix',
+        'prime_patterns',
+        'DegreeProbability',
+        'reasonable_degree_bound',
+        'reasonable_degree_probabilities',
     }
     assert expected.issubset(set(lad.__all__))
 

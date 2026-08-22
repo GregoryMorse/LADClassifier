@@ -14,6 +14,12 @@ from .binarization import (
     binarizer,
     postbinarize,
 )
+from ._prime_patterns import prime_patterns
+from ._probabilistic import (
+    DegreeProbability,
+    reasonable_degree_bound,
+    reasonable_degree_probabilities,
+)
 
 __all__ = [
     'LADClassifier',
@@ -26,5 +32,9 @@ __all__ = [
     'binarizeall',
     'postbinarize',
     'binarizecompare',
+    'prime_patterns',
+    'DegreeProbability',
+    'reasonable_degree_bound',
+    'reasonable_degree_probabilities',
     '__version__',
 ]

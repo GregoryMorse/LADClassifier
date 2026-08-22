@@ -19,6 +19,12 @@ interval work inside each subset. More bins increase each subset's interval
 space as well. No implementation of Algorithms 1--3 removes that outer
 combinatorial cost.
 
+PPC2 avoids enumerating every literal term but can still emit exponentially
+many prime patterns; its degree bound is therefore a hard safety control, not
+only a regularizer. The Gardy 2022 option can propose a smaller bound cheaply,
+but its probabilistic assumptions must be validated on the actual data and it
+does not change worst-case complexity.
+
 For large signal collections:
 
 * start with degree 2 or 3;
@@ -38,6 +44,11 @@ Run the included synthetic benchmark from the repository root::
 
     python benchmarks/benchmark_lad.py --samples 2000 --features 32 \
         --degree 3 --maxcombs 100 --repeat 3
+
+Select a later method explicitly when profiling it::
+
+    python benchmarks/benchmark_lad.py --samples 240 --features 30 \
+        --degree 4 --pattern-method chambon_ppc2_prime --repeat 3
 
 Use ``--exhaustive`` only for a deliberately small feature count. The command
 reports median and individual fit times as JSON so results can be archived and
