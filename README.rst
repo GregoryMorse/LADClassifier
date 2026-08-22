@@ -76,9 +76,14 @@ the `GitHub repository <https://github.com/GregoryMorse/LADClassifier>`_.
 Selectable methods
 ------------------
 
-``pattern_method`` selects ``alexe_hammer``, ``chambon_ppc2_prime``, or
-``chambon_ppc2_strong``. The PPC2 variants generate exact pure patterns and
-therefore require ``threshold_pct=1``. ``degree_strategy`` independently
+``pattern_method`` selects ``alexe_hammer``, ``chambon_ppc2_prime``,
+``chambon_ppc2_strong``, or ``hammer_ilp``. The PPC2 and Hammer ILP variants
+generate pure patterns and therefore require ``threshold_pct=1``.
+``hammer_ilp`` exactly linearizes the maximum-pattern formulation of Hammer
+and Bonates (2006), then can solve their minimum-cardinality pattern-cover
+model. Install ``LADClassifier[ilp]`` for PuLP; ``ilp_solver='auto'`` prefers
+Gurobi, then in-process HiGHS, with bundled CBC as the final fallback.
+``degree_strategy`` independently
 selects a fixed bound or the experimental ``gardy_2022`` Model-M1 bound. The
 latter uses only training-group counts and retains the paper's uniformity and
 independence assumptions.

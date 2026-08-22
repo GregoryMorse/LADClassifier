@@ -231,6 +231,8 @@ def postbinarize(X, binarizer_values):
             if values['binarymode']:
                 if len(cut_points) <= 1:
                     conditions.append(converted)
+                elif len(cut_points) == 2:
+                    conditions.append(converted == 0)
                 else:
                     one_hot = np.zeros(
                         (len(cut_points), len(X)), dtype=np.bool_

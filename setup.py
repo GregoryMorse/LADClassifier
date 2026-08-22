@@ -56,6 +56,7 @@ EXTRAS_REQUIRE = {
     ],
     'accelerate': ['numba>=0.58'],
     'plot': ['matplotlib>=3.7'],
+    'ilp': ['PuLP[cbc,highs]>=3.0'],
 }
 
 setup(name=DISTNAME,

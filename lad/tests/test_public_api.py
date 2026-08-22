@@ -14,6 +14,11 @@ def test_complete_public_api_is_exported():
         'BooleanEquationClassifier',
         'plot_confusion_matrix',
         'prime_patterns',
+        'maximum_pattern',
+        'hammer_maximum_patterns',
+        'minimum_pattern_cover',
+        'MaximumPatternSolution',
+        'HammerPatternModel',
         'DegreeProbability',
         'reasonable_degree_bound',
         'reasonable_degree_probabilities',
@@ -124,6 +129,8 @@ def test_estimator_values_round_trip_through_public_postbinarize():
     expected = classifier.discretizer_.transform(features)
     actual = classifier.postbinarize(features, classifier.binarizer_values_)
     np.testing.assert_array_equal(actual, expected)
+    assert expected.shape[1] == features.shape[1]
+    assert len(classifier.featnames_) == expected.shape[1]
 
 
 def test_multioutput_fit_uses_each_outputs_own_discretized_matrix(monkeypatch):

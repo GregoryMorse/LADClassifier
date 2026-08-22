@@ -30,6 +30,7 @@ from ._intervals import (
     upper_prevalence as _upper_prevalence,
 )
 from ._prime_patterns import prime_patterns as _prime_patterns
+from ._ilp_patterns import hammer_maximum_patterns as _hammer_maximum_patterns
 from ._probabilistic import reasonable_degree_bound as _reasonable_degree_bound
 from sklearn.base import BaseEstimator, ClassifierMixin, MultiOutputMixin, TransformerMixin
 from sklearn.utils.validation import check_is_fitted #check_X_y
@@ -209,6 +210,11 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
             return [np.zeros(len(data), dtype=np.bool_)] if binarymode else np.zeros(len(data), dtype=np.bool_)
         cond = np.searchsorted([x[0] for x in cut_points[1:]], data, side='right') #np.digitize()
         if not binarymode: return cond
+        if lcp == 2:
+            # Two mutually exclusive bins carry one bit of information. Match
+            # the public binarizer and its single readable ``value < split``
+            # feature instead of emitting two redundant one-hot columns.
+            return [cond == 0]
         condbin = (cond, np.arange(len(data)))
         cond = np.zeros((len(cut_points), len(data)), dtype=np.bool_)
         cond[condbin] = 1
@@ -501,7 +507,8 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
             if self.binarizer_values_[i] is None:
                 bounds.append(2)
             elif self.binarizer_values_[i]['binarymode']:
-                bounds.extend([2] * len(self.binarizer_values_[i]['cut_points']))
+                cut_point_count = len(self.binarizer_values_[i]['cut_points'])
+                bounds.extend([2] * (1 if cut_point_count <= 2 else cut_point_count))
             else:
                 bounds.append(max(1, len(self.binarizer_values[i]['cut_points']))) #* 2
             #mutex.append(np.arange(len(condarr)-len(conds), len(condarr)))
@@ -915,13 +922,32 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         If None, the random number generator is the RandomState instance
         used by np.random.
     pattern_method : {'alexe_hammer', 'chambon_ppc2_prime',
-                      'chambon_ppc2_strong'}, default='alexe_hammer'
+                      'chambon_ppc2_strong', 'hammer_ilp'}, default='alexe_hammer'
         Pattern-generation engine. The PPC2 variants implement the exact pure
         prime-pattern construction of Chambon et al. (2019); ``strong`` removes
-        patterns whose positive cover is strictly dominated.
+        patterns whose positive cover is strictly dominated. ``hammer_ilp``
+        implements the maximum-pattern and model-covering formulations of
+        Hammer and Bonates (2006).
     degree_strategy : {'fixed', 'gardy_2022'}, default='fixed'
         Either use ``degree`` directly or select a bound no larger than it from
         the Model-M1 probabilities of Gardy, Lardeux, and Saubion (2022).
+    ilp_solver : {'auto', 'gurobi', 'highs', 'cbc'}, default='auto'
+        Solver used by ``hammer_ilp``. Auto tries Gurobi, HiGHS, then CBC.
+    ilp_time_limit_seconds : float or None, default=None
+        Per-solve limit. A non-optimal timeout fails rather than returning an
+        unproved maximum pattern.
+    ilp_relative_gap : float, default=0
+        Relative MIP gap. Keep zero when an exact optimum is required.
+    ilp_robustness : int, default=1
+        Opposite-class multiple-cover requirement from Hammer--Bonates.
+    ilp_model_selection : {'complete', 'minimum_cover'}, default='minimum_cover'
+        Keep every maximum pattern or solve the paper's minimum model cover.
+    ilp_model_coverage : int, default=1
+        Required selected-pattern coverage multiplicity for model formation.
+    ilp_max_anchors : int, default=0
+        Maximum distinct anchors per class; zero uses all anchors.
+    ilp_threads : int or None, default=1
+        Solver thread count.
 
     Attributes
     ----------
@@ -941,7 +967,11 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
     def __init__(self, degree=4, random=True, maxcombs=100, threshold_pct=1,
                  minmatch_pct=0.001, feature_names=None, binarizer_params=None,
                  penalty_value=None, random_state=None,
-                 pattern_method='alexe_hammer', degree_strategy='fixed'):
+                 pattern_method='alexe_hammer', degree_strategy='fixed',
+                 ilp_solver='auto', ilp_time_limit_seconds=None,
+                 ilp_relative_gap=0, ilp_robustness=1,
+                 ilp_model_selection='minimum_cover', ilp_model_coverage=1,
+                 ilp_max_anchors=0, ilp_threads=1):
         self.degree = degree
         self.random = random
         self.maxcombs = maxcombs
@@ -953,6 +983,14 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         self.random_state = random_state
         self.pattern_method = pattern_method
         self.degree_strategy = degree_strategy
+        self.ilp_solver = ilp_solver
+        self.ilp_time_limit_seconds = ilp_time_limit_seconds
+        self.ilp_relative_gap = ilp_relative_gap
+        self.ilp_robustness = ilp_robustness
+        self.ilp_model_selection = ilp_model_selection
+        self.ilp_model_coverage = ilp_model_coverage
+        self.ilp_max_anchors = ilp_max_anchors
+        self.ilp_threads = ilp_threads
         #self.mutual_exclusions = mutual_exclusions
         self._estimator_type = 'classifier' #needed for stratified k-folds in GridSearchCV
     #def _get_tags(self): return {'poor_score':True,'multioutput':True}
@@ -1194,7 +1232,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         return self
     def _fit(self, X, y, classes, curbounds):
         if self.pattern_method not in {
-            'alexe_hammer', 'chambon_ppc2_prime', 'chambon_ppc2_strong'
+            'alexe_hammer', 'chambon_ppc2_prime', 'chambon_ppc2_strong',
+            'hammer_ilp'
         }:
             raise ValueError('Unknown LAD pattern method: ' + str(self.pattern_method))
         if self.degree_strategy not in {'fixed', 'gardy_2022'}:
@@ -1235,8 +1274,10 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             )
         if self.threshold_pct != 1:
             raise ValueError(
-                'Chambon PPC2 generates pure patterns and requires threshold_pct=1'
+                'pure-pattern engines require threshold_pct=1'
             )
+        if self.pattern_method == 'hammer_ilp':
+            return self._fit_hammer_ilp(X, y, classes, selected_degree)
         return self._fit_ppc2(
             X,
             y,
@@ -1268,6 +1309,49 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 target_class,
                 equations,
             ))
+        finaleqs.sort(key=lambda result: result[0], reverse=True)
+        return finaleqs
+
+    def _fit_hammer_ilp(self, X, y, classes, degree):
+        """Generate maximum patterns and optionally an exact minimum cover."""
+
+        minmatch = max(1, int(len(y) * self.minmatch_pct))
+        finaleqs = []
+        self.ilp_diagnostics_ = []
+        for target_class in classes:
+            positive = X[y == target_class]
+            negative = X[y != target_class]
+            result = _hammer_maximum_patterns(
+                positive,
+                negative,
+                degree,
+                solver=self.ilp_solver,
+                time_limit_seconds=self.ilp_time_limit_seconds,
+                relative_gap=self.ilp_relative_gap,
+                robustness=self.ilp_robustness,
+                model_selection=self.ilp_model_selection,
+                model_coverage=self.ilp_model_coverage,
+                max_anchors=self.ilp_max_anchors,
+                threads=self.ilp_threads,
+                min_positive_coverage=minmatch,
+            )
+            equations = list(result.patterns)
+            predictions = self._predict(X, equations)
+            finaleqs.append((
+                f1_score(y == target_class, predictions, pos_label=True),
+                target_class,
+                equations,
+            ))
+            self.ilp_diagnostics_.append({
+                'class': target_class,
+                'solver': result.solver,
+                'unique_anchors': result.unique_anchor_count,
+                'feasible_anchors': result.feasible_anchor_count,
+                'candidate_patterns': len(result.candidate_patterns),
+                'selected_patterns': len(result.patterns),
+                'covered_positive': result.covered_positive_count,
+                'positive_observations': len(positive),
+            })
         finaleqs.sort(key=lambda result: result[0], reverse=True)
         return finaleqs
 
@@ -1593,7 +1677,15 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 'minmatch_pct': self.minmatch_pct, 'feature_names': self.feature_names,
                 'binarizer_params':self.binarizer_params, 'random_state':self.random_state,
                 'pattern_method':self.pattern_method,
-                'degree_strategy':self.degree_strategy}
+                'degree_strategy':self.degree_strategy,
+                'ilp_solver':self.ilp_solver,
+                'ilp_time_limit_seconds':self.ilp_time_limit_seconds,
+                'ilp_relative_gap':self.ilp_relative_gap,
+                'ilp_robustness':self.ilp_robustness,
+                'ilp_model_selection':self.ilp_model_selection,
+                'ilp_model_coverage':self.ilp_model_coverage,
+                'ilp_max_anchors':self.ilp_max_anchors,
+                'ilp_threads':self.ilp_threads}
                 #'mutual_exclusions':self.mutual_exclusions}
     def set_params(self, **params):
         if 'degree' in params: self.degree = params['degree']
@@ -1606,6 +1698,14 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         if 'random_state' in params: self.random_state = params['random_state']
         if 'pattern_method' in params: self.pattern_method = params['pattern_method']
         if 'degree_strategy' in params: self.degree_strategy = params['degree_strategy']
+        if 'ilp_solver' in params: self.ilp_solver = params['ilp_solver']
+        if 'ilp_time_limit_seconds' in params: self.ilp_time_limit_seconds = params['ilp_time_limit_seconds']
+        if 'ilp_relative_gap' in params: self.ilp_relative_gap = params['ilp_relative_gap']
+        if 'ilp_robustness' in params: self.ilp_robustness = params['ilp_robustness']
+        if 'ilp_model_selection' in params: self.ilp_model_selection = params['ilp_model_selection']
+        if 'ilp_model_coverage' in params: self.ilp_model_coverage = params['ilp_model_coverage']
+        if 'ilp_max_anchors' in params: self.ilp_max_anchors = params['ilp_max_anchors']
+        if 'ilp_threads' in params: self.ilp_threads = params['ilp_threads']
         #if 'mutual_exclusions' in params: self.mutual_exclusions = params['mutual_exclusions']
         return self
 def test_lad():

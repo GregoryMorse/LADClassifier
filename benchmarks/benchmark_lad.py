@@ -26,9 +26,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--seed', type=int, default=1729)
     parser.add_argument(
         '--pattern-method',
-        choices=('alexe_hammer', 'chambon_ppc2_prime', 'chambon_ppc2_strong'),
+        choices=(
+            'alexe_hammer',
+            'chambon_ppc2_prime',
+            'chambon_ppc2_strong',
+            'hammer_ilp',
+        ),
         default='alexe_hammer',
     )
+    parser.add_argument(
+        '--ilp-solver',
+        choices=('auto', 'gurobi', 'highs', 'cbc'),
+        default='auto',
+    )
+    parser.add_argument(
+        '--ilp-model-selection',
+        choices=('complete', 'minimum_cover'),
+        default='minimum_cover',
+    )
+    parser.add_argument('--ilp-max-anchors', type=int, default=0)
+    parser.add_argument('--ilp-time-limit-seconds', type=int, default=30)
     parser.add_argument(
         '--degree-strategy',
         choices=('fixed', 'gardy_2022'),
@@ -71,10 +88,14 @@ def main() -> None:
             maxcombs=args.maxcombs,
             random_state=args.seed + repeat,
             threshold_pct=(
-                1 if args.pattern_method.startswith('chambon_ppc2') else 0.9
+                0.9 if args.pattern_method == 'alexe_hammer' else 1
             ),
             pattern_method=args.pattern_method,
             degree_strategy=args.degree_strategy,
+            ilp_solver=args.ilp_solver,
+            ilp_model_selection=args.ilp_model_selection,
+            ilp_max_anchors=args.ilp_max_anchors,
+            ilp_time_limit_seconds=args.ilp_time_limit_seconds,
         )
         started = time.perf_counter()
         classifier.fit(features, target)
@@ -91,6 +112,10 @@ def main() -> None:
         'pattern_method': args.pattern_method,
         'degree_strategy': args.degree_strategy,
         'maxcombs': args.maxcombs,
+        'ilp_solver': args.ilp_solver,
+        'ilp_model_selection': args.ilp_model_selection,
+        'ilp_max_anchors': args.ilp_max_anchors,
+        'ilp_time_limit_seconds': args.ilp_time_limit_seconds,
         'repeat': args.repeat,
         'seconds': durations,
         'median_seconds': statistics.median(durations),
