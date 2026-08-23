@@ -62,3 +62,21 @@ The automated checks establish algorithmic equivalence on the paper's worked
 case plus independent finite oracles; they are much stronger than a single
 end-to-end accuracy assertion, but they are not a formal proof for every
 possible input.
+
+Later methods
+-------------
+
+``pattern_method='chambon_ppc2_prime'`` implements PPC2 from Chambon,
+Lardeux, Saubion, and Boureau (2019). For each positive observation it builds
+the paper's constraint matrix, computes all degree-bounded non-dominated
+hitting sets, transforms them into literals, and merges their covers.
+``chambon_ppc2_strong`` additionally applies Algorithm 5's strict
+cover-dominance test. An independent exhaustive Boolean oracle validates the
+result on random finite instances. Equality literals extend the same constraint
+construction to finite-domain discretized attributes.
+
+``degree_strategy='gardy_2022'`` implements equations (3) and the Model-M1
+reasonable-bound probability from Gardy, Lardeux, and Saubion (2022). It is a
+bound-selection model—not a pattern generator—and keeps the paper's uniform,
+independent Boolean-attribute assumptions. The fixed strategy remains the
+default.

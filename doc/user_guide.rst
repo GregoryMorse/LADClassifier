@@ -18,6 +18,11 @@ Training flow
 4. Retain patterns meeting the requested precision and minimum-coverage
    criteria, then remove dominated patterns.
 
+At prediction time, every retained class rule set is evaluated. The
+highest-scoring matching class wins; an observation matching no rule uses the
+most prevalent training class. This makes the residual policy explicit and
+prevents class ordering from creating an arbitrary default.
+
 Key controls
 ------------
 
