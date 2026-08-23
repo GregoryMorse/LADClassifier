@@ -1,34 +1,41 @@
-####################
-project-template API
-####################
+API reference
+=============
 
-This is an example on how to document the API of your own project.
+.. currentmodule:: lad
 
-.. currentmodule:: skltemplate
-
-Estimator
-=========
+Classifiers
+-----------
 
 .. autosummary::
    :toctree: generated/
    :template: class.rst
 
-   TemplateEstimator
+   LADClassifier
+   BooleanEquationClassifier
 
-Transformer
-===========
-
-.. autosummary::
-   :toctree: generated/
-   :template: class.rst
-
-   TemplateTransformer
-
-Predictor
-=========
+Feature processing
+------------------
 
 .. autosummary::
    :toctree: generated/
    :template: class.rst
 
-    TemplateClassifier
+   DiscretizingTransformer
+   FeatureGroup
+
+.. autosummary::
+   :toctree: generated/
+
+   binarizer
+   binarize
+   binarizeall
+   postbinarize
+   binarizecompare
+
+Plotting
+--------
+
+.. autosummary::
+   :toctree: generated/
+
+   plot_confusion_matrix

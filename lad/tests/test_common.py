@@ -9,4 +9,4 @@ from lad import LADClassifier
     "Estimator", [LADClassifier]
 )
 def test_all_estimators(Estimator):
-    return check_estimator(Estimator)
+    check_estimator(Estimator())

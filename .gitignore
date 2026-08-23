@@ -47,6 +47,7 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+.mpl-cache/
 nosetests.xml
 coverage.xml
 *,cover
@@ -62,6 +63,7 @@ coverage.xml
 # Sphinx documentation
 doc/_build/
 doc/generated/
+doc/sg_execution_times.rst
 
 # PyBuilder
 target/

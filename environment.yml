@@ -1,5 +1,8 @@
 name: LADClassifier
 dependencies:
-  - numpy
-  - scipy
-  - scikit-learn
+  - numpy>=1.24
+  - scipy>=1.10
+  - scikit-learn>=1.3
+  - pip
+  - pip:
+    - pysettrie>=1.0

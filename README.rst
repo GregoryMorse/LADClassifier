@@ -1,36 +1,94 @@
-.. -*- mode: rst -*-
+LADClassifier
+=============
 
-|Travis|_ |AppVeyor|_ |Codecov|_ |CircleCI|_ |ReadTheDocs|_
+.. image:: doc/_static/ladclassifier-logo.svg
+   :alt: LADClassifier - logical patterns, explainable decisions
+   :width: 720
+   :align: center
 
-.. |Travis| image:: https://travis-ci.org/scikit-learn-contrib/project-template.svg?branch=master
-.. _Travis: https://travis-ci.org/scikit-learn-contrib/project-template
+``LADClassifier`` implements Logical Analysis of Data (LAD) for Python's
+scikit-learn ecosystem. LAD constructs Boolean patterns from discretized
+features, producing rules that can be inspected and explained rather than
+only opaque class scores.
 
-.. |AppVeyor| image:: https://ci.appveyor.com/api/projects/status/coy2qqaqr1rnnt5y/branch/master?svg=true
-.. _AppVeyor: https://ci.appveyor.com/project/glemaitre/project-template
+This release reconciles the original public project with the newer classifier
+used by the trader project. It exposes the binarizer, transformer, feature
+grouping, multiclass, and Boolean-equation APIs from one canonical package.
 
-.. |Codecov| image:: https://codecov.io/gh/scikit-learn-contrib/project-template/branch/master/graph/badge.svg
-.. _Codecov: https://codecov.io/gh/scikit-learn-contrib/project-template
+Public API
+----------
 
-.. |CircleCI| image:: https://circleci.com/gh/scikit-learn-contrib/project-template.svg?style=shield&circle-token=:circle-token
-.. _CircleCI: https://circleci.com/gh/scikit-learn-contrib/project-template/tree/master
+The ``lad`` package exports:
 
-.. |ReadTheDocs| image:: https://readthedocs.org/projects/sklearn-template/badge/?version=latest
-.. _ReadTheDocs: https://sklearn-template.readthedocs.io/en/latest/?badge=latest
+* ``LADClassifier``
+* ``DiscretizingTransformer``
+* ``FeatureGroup``
+* ``BooleanEquationClassifier``
+* ``plot_confusion_matrix``
 
-LADClassifier - A Logical Analysis of Data classifier for Python's scikit-learn
-===============================================================================
+Feature binarization now lives in the public ``lad.binarization`` module. Its
+``binarizer``, ``binarize``, ``binarizeall``, ``postbinarize``, and
+``binarizecompare`` functions are also exported by ``lad``. Compatibility
+aliases remain on ``LADClassifier`` for existing callers.
 
-.. _LADClassifier: https://github.com/GregoryMorse/LADClassifier
+Installation
+------------
 
-**LADClassifier** is a Logical Analysis of Data classifier for Python's scikit-learn_.
+Clone the repository and install it in editable mode while developing::
 
-It allows for Boolean equations of features to be found in a data set.
-This provides a human readable and understandable pattern which has
-practical use.  As well the classifier can often outperform other
-classifiers and has its own resilience to over fitting in some contexts.
+    git clone https://github.com/GregoryMorse/LADClassifier.git
+    cd LADClassifier
+    python -m pip install -e .
 
-.. _documentation: https://github.com/GregoryMorse/LADClassifier/blob/master/doc/quick_start.rst
+Numba acceleration and plotting are optional::
 
-Refer to the documentation_ to learn how to use the classifier.
+    python -m pip install -e ".[accelerate,plot]"
 
-*Thank you for any bug or issue reports or pull requests or any other contributions LADClassifier project!*
+Run the tests with::
+
+    python -m pip install -e ".[tests]"
+    python -m pytest
+
+Quick start
+-----------
+
+::
+
+    import numpy as np
+    from lad import LADClassifier
+
+    X = np.array([
+        [0.0, 0.1],
+        [0.2, 0.1],
+        [0.8, 0.9],
+        [1.0, 0.8],
+    ])
+    y = np.array([0, 0, 1, 1])
+
+    classifier = LADClassifier(random_state=0)
+    classifier.fit(X, y)
+    predictions = classifier.predict(X)
+
+For the longer walkthrough, see `the quick-start guide
+<doc/quick_start.rst>`_. Bug reports and contributions are welcome through
+the `GitHub repository <https://github.com/GregoryMorse/LADClassifier>`_.
+
+Algorithm validation and performance
+------------------------------------
+
+The interval-enumeration core follows Algorithms 1--3 from Sorin Alexe and
+Peter L. Hammer, `Accelerated algorithm for pattern detection in logical
+analysis of data <https://doi.org/10.1016/j.dam.2005.03.032>`_. Automated
+tests reproduce all 20 prevalence matrices in the paper's worked example and
+also compare every interval of independent multidimensional examples with a
+brute-force oracle.
+
+See `paper validation <doc/algorithm.rst>`_ for the implementation mapping and
+scope, and `performance guidance <doc/performance.rst>`_ before selecting a
+degree or an exhaustive feature search. A reproducible benchmark is provided
+in ``benchmarks/benchmark_lad.py``.
+
+License
+-------
+
+LADClassifier is distributed under the MIT License.
