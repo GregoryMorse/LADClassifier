@@ -17,6 +17,7 @@ except ImportError:  # Numba is an acceleration, not a semantic requirement.
     numba = _NumbaFallback()
 import numpy as np
 import settrie
+from time import perf_counter
 from .binarization import (
     binarize as _public_binarize,
     binarizeall as _public_binarizeall,
@@ -215,6 +216,12 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
             # the public binarizer and its single readable ``value < split``
             # feature instead of emitting two redundant one-hot columns.
             return [cond == 0]
+        if not interval:
+            # Level encoding: each bit means the value reached a progressively
+            # higher cut point. Unlike interval one-hot bins these conditions
+            # are nested, which is useful for monotone LAD rules.
+            starts = [point[0] for point in cut_points[1:]]
+            return np.asarray([data >= start for start in starts])
         condbin = (cond, np.arange(len(data)))
         cond = np.zeros((len(cut_points), len(data)), dtype=np.bool_)
         cond[condbin] = 1
@@ -508,9 +515,15 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
                 bounds.append(2)
             elif self.binarizer_values_[i]['binarymode']:
                 cut_point_count = len(self.binarizer_values_[i]['cut_points'])
-                bounds.extend([2] * (1 if cut_point_count <= 2 else cut_point_count))
+                interval = self.binarizer_values_[i]['interval']
+                feature_count = (
+                    1
+                    if cut_point_count <= 2
+                    else cut_point_count if interval else cut_point_count - 1
+                )
+                bounds.extend([2] * feature_count)
             else:
-                bounds.append(max(1, len(self.binarizer_values[i]['cut_points']))) #* 2
+                bounds.append(max(1, len(self.binarizer_values_[i]['cut_points']))) #* 2
             #mutex.append(np.arange(len(condarr)-len(conds), len(condarr)))
         return bounds
 
@@ -971,7 +984,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                  ilp_solver='auto', ilp_time_limit_seconds=None,
                  ilp_relative_gap=0, ilp_robustness=1,
                  ilp_model_selection='minimum_cover', ilp_model_coverage=1,
-                 ilp_max_anchors=0, ilp_threads=1):
+                 ilp_max_anchors=0, ilp_threads=1,
+                 fit_time_limit_seconds=None):
         self.degree = degree
         self.random = random
         self.maxcombs = maxcombs
@@ -991,6 +1005,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         self.ilp_model_coverage = ilp_model_coverage
         self.ilp_max_anchors = ilp_max_anchors
         self.ilp_threads = ilp_threads
+        self.fit_time_limit_seconds = fit_time_limit_seconds
         #self.mutual_exclusions = mutual_exclusions
         self._estimator_type = 'classifier' #needed for stratified k-folds in GridSearchCV
     #def _get_tags(self): return {'poor_score':True,'multioutput':True}
@@ -1148,6 +1163,15 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 "This LADClassifier estimator requires y to be passed, "
                 "but the target y is None"
             )
+        if self.fit_time_limit_seconds is not None and self.fit_time_limit_seconds <= 0:
+            raise ValueError('fit_time_limit_seconds must be positive or None')
+        self.fit_timed_out_ = False
+        self._fit_started_at_ = perf_counter()
+        self._fit_deadline_ = (
+            self._fit_started_at_ + self.fit_time_limit_seconds
+            if self.fit_time_limit_seconds is not None
+            else None
+        )
         #binarization comes first
         #X, y = check_X_y(X, y)
         #self.classes_ = unique_labels(y)
@@ -1229,6 +1253,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     self.classes_[k],
                     self.bounds_[k],
                 )
+        self.fit_elapsed_seconds_ = perf_counter() - self._fit_started_at_
         return self
     def _fit(self, X, y, classes, curbounds):
         if self.pattern_method not in {
@@ -1362,6 +1387,15 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             vals.append(X[y == k,:])
         minmatch = int(len(y) * self.minmatch_pct)
         import itertools
+        class _FitDeadlineReached(Exception):
+            pass
+
+        def enforce_fit_deadline():
+            if (
+                self._fit_deadline_ is not None
+                and perf_counter() >= self._fit_deadline_
+            ):
+                raise _FitDeadlineReached()
         def prec_penalty(precision, featpct): #reduce precision based on number of features
             a = self.penalty_value
             return (a ** (1-featpct) - 1) / (a-1) * precision #exponential between 0 and 1: (a^x-1)/(a-1) where higher a has higher decay
@@ -1454,6 +1488,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     else: lo = mid+1
                 pats.insert(lo, (sigmaI, num, found))
         def calc_permute(comb, pats, pattrie):
+            enforce_fit_deadline()
             #deg = len(comb)
             #gcodes = extended_gray_code(tuple([1] * deg))
             #if deg == 1: #fast route for single features
@@ -1481,6 +1516,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             num_gcodes, lenPiV0s = len(gcodes), len(PiV0s)
             cmb = np.array(comb)
             for gcode in range(num_gcodes):
+                enforce_fit_deadline()
                 #i = np.ndindex(bounds)
                 curgcode = gcodes[gcode]
                 V = curgcode[0]
@@ -1545,60 +1581,66 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             pats.append([(np.float64(0), np.uint32(0), np.array(list(), dtype=np.int32))])
             #pats.append(dict())
             pattrie.append(settrie.SetTrie())
-        if self.random and X.shape[1] > degree:
-            if self.random_state is None:
-                rnd = np.random
-            elif type(self.random_state) is np.random.RandomState:
-                rnd = self.random_state
-            else:
-                rnd = np.random.RandomState(self.random_state)
-            for _ in range(self.maxcombs):
-                rnd.shuffle(permute)
-                for i in range(0, len(permute), degree):
-                    calc_permute(permute[i:i+degree], pats, pattrie)
-            cur, c = [len(vals[k]) for k in range(len(vals))], 0
-            #cantfind = set()
-            while True:
-                pmt, rem, falsethresh = list(), list(), list()
-                for k in range(len(vals)):
-                    if cur[k] == 0:
-                        remaining = list()
-                        falsethresh.append(False)
-                    elif len(pats[k]) == 1:
-                        remaining = np.nonzero(y == classes[k])[0]
-                        falsethresh.append(False)
-                    else:
-                        #preds = self._predict(X, [x for x in pats[k].keys()])
-                        preds = self._predict(X, [x[2] for x in pats[k]])
-                        falsepos = np.sum(preds & (y != classes[k]))
-                        falsethresh.append(falsepos > len(vals[k]) * (1 - self.threshold_pct))
-                        remaining = np.nonzero(~preds & (y == classes[k]))[0]
-                    rem.append(len(remaining))
-                    pmt.extend([np.nonzero(X[remaining[x]])[0] for x in range(len(remaining))])
-                if all([x == 0 for x in rem]) or all(falsethresh): break
-                permute = np.array(list(set(np.concatenate(pmt))))
-                if any([rem[x] != cur[x] for x in range(len(rem))]):
-                    cur = rem
-                #if cur != 0:
-                #    permute = np.nonzero(X[remaining[0]])[0]
-                #else:
-                #    permute = np.nonzero(X[remainingneg[0]])[0]
-                curlens, startc = [len(p) for p in pats], c
-                while all([curlens[k] == len(pats[k]) for k in range(len(pats))]) and startc + self.maxcombs > c:
+        try:
+            if self.random and X.shape[1] > degree:
+                if self.random_state is None:
+                    rnd = np.random
+                elif type(self.random_state) is np.random.RandomState:
+                    rnd = self.random_state
+                else:
+                    rnd = np.random.RandomState(self.random_state)
+                for _ in range(self.maxcombs):
                     rnd.shuffle(permute)
                     for i in range(0, len(permute), degree):
                         calc_permute(permute[i:i+degree], pats, pattrie)
-                    c += 1
-                if startc + self.maxcombs <= c: break
-                #    cantfind.add(remaining[0] if cur != 0 else remainingneg[0])
-        else:
-            for comb in itertools.combinations(permute, degree):
-                calc_permute(comb, pats, pattrie)
+                cur, c = [len(vals[k]) for k in range(len(vals))], 0
+                #cantfind = set()
+                while True:
+                    pmt, rem, falsethresh = list(), list(), list()
+                    for k in range(len(vals)):
+                        if cur[k] == 0:
+                            remaining = list()
+                            falsethresh.append(False)
+                        elif len(pats[k]) == 1:
+                            remaining = np.nonzero(y == classes[k])[0]
+                            falsethresh.append(False)
+                        else:
+                            #preds = self._predict(X, [x for x in pats[k].keys()])
+                            preds = self._predict(X, [x[2] for x in pats[k]])
+                            falsepos = np.sum(preds & (y != classes[k]))
+                            falsethresh.append(falsepos > len(vals[k]) * (1 - self.threshold_pct))
+                            remaining = np.nonzero(~preds & (y == classes[k]))[0]
+                        rem.append(len(remaining))
+                        pmt.extend([np.nonzero(X[remaining[x]])[0] for x in range(len(remaining))])
+                    if all([x == 0 for x in rem]) or all(falsethresh): break
+                    permute = np.array(list(set(np.concatenate(pmt))))
+                    if any([rem[x] != cur[x] for x in range(len(rem))]):
+                        cur = rem
+                    #if cur != 0:
+                    #    permute = np.nonzero(X[remaining[0]])[0]
+                    #else:
+                    #    permute = np.nonzero(X[remainingneg[0]])[0]
+                    curlens, startc = [len(p) for p in pats], c
+                    while all([curlens[k] == len(pats[k]) for k in range(len(pats))]) and startc + self.maxcombs > c:
+                        rnd.shuffle(permute)
+                        for i in range(0, len(permute), degree):
+                            calc_permute(permute[i:i+degree], pats, pattrie)
+                        c += 1
+                    if startc + self.maxcombs <= c: break
+                    #    cantfind.add(remaining[0] if cur != 0 else remainingneg[0])
+            else:
+                for comb in itertools.combinations(permute, degree):
+                    calc_permute(comb, pats, pattrie)
+        except _FitDeadlineReached:
+            self.fit_timed_out_ = True
         #print(pats, negpats)
         finaleqs = list()
         for k in range(len(pats)):
             #eqs = [x for x in pats[k].keys()]
-            eqs = [x[2] for x in pats[k]]
+            # ``pats`` starts with an empty sentinel so the insertion logic has
+            # a stable lower bound. It is bookkeeping, not a learned rule,
+            # and must never escape through the public fitted model.
+            eqs = [x[2] for x in pats[k] if len(x[2]) != 0]
             preds = self._predict(X, eqs)
             finaleqs.append((f1_score(y == classes[k], preds, pos_label=True), classes[k], eqs))
         #print(minmatch, accuracy_score(y, preds), accuracy_score(y, negpreds), pats, negpats)
@@ -1685,7 +1727,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 'ilp_model_selection':self.ilp_model_selection,
                 'ilp_model_coverage':self.ilp_model_coverage,
                 'ilp_max_anchors':self.ilp_max_anchors,
-                'ilp_threads':self.ilp_threads}
+                'ilp_threads':self.ilp_threads,
+                'fit_time_limit_seconds':self.fit_time_limit_seconds}
                 #'mutual_exclusions':self.mutual_exclusions}
     def set_params(self, **params):
         if 'degree' in params: self.degree = params['degree']
@@ -1706,6 +1749,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         if 'ilp_model_coverage' in params: self.ilp_model_coverage = params['ilp_model_coverage']
         if 'ilp_max_anchors' in params: self.ilp_max_anchors = params['ilp_max_anchors']
         if 'ilp_threads' in params: self.ilp_threads = params['ilp_threads']
+        if 'fit_time_limit_seconds' in params: self.fit_time_limit_seconds = params['fit_time_limit_seconds']
         #if 'mutual_exclusions' in params: self.mutual_exclusions = params['mutual_exclusions']
         return self
 def test_lad():
