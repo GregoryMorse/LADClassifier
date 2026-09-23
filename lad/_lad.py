@@ -945,7 +945,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         Either use ``degree`` directly or select a bound no larger than it from
         the Model-M1 probabilities of Gardy, Lardeux, and Saubion (2022).
     ilp_solver : {'auto', 'gurobi', 'highs', 'cbc'}, default='auto'
-        Solver used by ``hammer_ilp``. Auto tries Gurobi, HiGHS, then CBC.
+        Solver used by ``hammer_ilp``. Auto tries free HiGHS, then CBC;
+        Gurobi is available only when explicitly selected.
     ilp_time_limit_seconds : float or None, default=None
         Per-solve limit. A non-optimal timeout fails rather than returning an
         unproved maximum pattern.

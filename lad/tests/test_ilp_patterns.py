@@ -1,13 +1,35 @@
 from itertools import combinations
+from types import SimpleNamespace
 
 import numpy as np
+import pulp
 
 from lad import LADClassifier
 from lad._ilp_patterns import (
+    _solve,
+    _solver_factory,
     hammer_maximum_patterns,
     maximum_pattern,
     minimum_pattern_cover,
 )
+
+
+def test_auto_uses_unlicensed_open_source_solver():
+    chosen = _solver_factory(
+        "auto", time_limit_seconds=None, relative_gap=0, threads=1
+    )
+    assert chosen.name in {"highs", "cbc"}
+
+
+def test_time_limited_incumbent_is_not_claimed_as_optimal():
+    class FakeProblem:
+        sol_status = pulp.LpSolutionIntegerFeasible
+
+        def solve(self, _solver):
+            return pulp.LpStatusOptimal
+
+    factory = SimpleNamespace(create=lambda: SimpleNamespace(close=lambda: None), pulp=pulp)
+    assert _solve(FakeProblem(), factory) == "FeasibleNotProven"
 
 
 def _cover(values, pattern):

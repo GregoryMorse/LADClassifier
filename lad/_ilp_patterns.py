@@ -15,7 +15,6 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
-import warnings
 
 import numpy as np
 
@@ -107,17 +106,15 @@ def _solver_factory(
     if threads is not None and threads < 1:
         raise ValueError("ILP thread count must be positive or None")
 
-    if selected in {"auto", "gurobi"}:
+    # AUTO must remain usable without an academic/commercial license.  The
+    # explicitly requested Gurobi route is retained for comparisons only.
+    if selected == "gurobi":
         candidate = _SolverFactory(
             "gurobi", pulp, time_limit_seconds, relative_gap, threads
         )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            available = bool(candidate.create().available())
-        if available:
+        if candidate.create().available():
             return candidate
-        if selected == "gurobi":
-            raise RuntimeError("Gurobi was requested but is unavailable or unlicensed")
+        raise RuntimeError("Gurobi was requested but is unavailable or unlicensed")
 
     if selected in {"auto", "highs"}:
         candidate = _SolverFactory(
@@ -144,7 +141,14 @@ def _solve(problem: Any, factory: _SolverFactory) -> str:
         close = getattr(solver, "close", None)
         if close is not None:
             close()
-    return str(factory.pulp.LpStatus[status_code])
+    status = str(factory.pulp.LpStatus[status_code])
+    # PuLP's HiGHS/CBC adapters can map a time-limited feasible incumbent to
+    # LpStatusOptimal.  Hammer's lexicographic maximum and minimum cover are
+    # *proof* claims; the secondary solution status must confirm optimality.
+    if (status == "Optimal" and getattr(problem, "sol_status", None)
+            != factory.pulp.LpSolutionOptimal):
+        return "FeasibleNotProven"
+    return status
 
 
 def _validate_observations(
