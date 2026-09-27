@@ -160,6 +160,24 @@ def test_multioutput_fit_uses_each_outputs_own_discretized_matrix(monkeypatch):
         )
 
 
+def test_thermometer_schema_is_identical_after_artifact_roundtrip():
+    features = np.array([[0.0], [0.2], [0.5], [0.8], [1.0]])
+    labels = np.array([0, 0, 1, 1, 1])
+    classifier = lad.LADClassifier(
+        degree=1,
+        random=False,
+        binarizer_params={
+            'method': 'equaldivisions', 'divisions': 5,
+            'binarymode': True, 'interval': False,
+        },
+    ).fit(features, labels)
+    expected = classifier.discretizer_.transform(features)
+    actual = classifier.postbinarize(features, classifier.binarizer_values_)
+    assert expected.shape == (len(features), 4)
+    np.testing.assert_array_equal(actual, expected)
+    assert np.all(np.diff(expected.astype(int), axis=1) <= 0)
+
+
 def test_unmatched_rows_use_training_majority_instead_of_tuple_order():
     features = np.tile([[0.0], [1.0]], (7, 1))
     labels = np.repeat(np.array([-2, -1, 1, 1, 1, 2, 1]), 2)

@@ -233,6 +233,9 @@ def postbinarize(X, binarizer_values):
                     conditions.append(converted)
                 elif len(cut_points) == 2:
                     conditions.append(converted == 0)
+                elif not values.get('interval', True):
+                    for point in cut_points[1:]:
+                        conditions.append(X[:, index] >= point[0])
                 else:
                     one_hot = np.zeros(
                         (len(cut_points), len(X)), dtype=np.bool_

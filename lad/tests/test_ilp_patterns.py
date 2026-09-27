@@ -80,6 +80,32 @@ def test_hammer_ilp_matches_independent_exhaustive_maximum_pattern_oracle():
             assert not np.any(_cover(negative, actual.pattern))
 
 
+def test_weighted_hammer_matches_brute_force_coverage_and_degree():
+    positive = np.array([[0, 0, 0], [0, 1, 0], [0, 1, 1]])
+    negative = np.array([[1, 0, 1], [1, 1, 0]])
+    weights = np.array([1.0, 0.25, 8.0])
+    observation = positive[0]
+    feasible = []
+    for degree in (1, 2):
+        for attributes in combinations(range(positive.shape[1]), degree):
+            pattern = tuple((feature, int(observation[feature])) for feature in attributes)
+            if np.any(_cover(negative, pattern)):
+                continue
+            feasible.append((float(weights[_cover(positive, pattern)].sum()), degree))
+    expected_weight = max(weight for weight, _ in feasible)
+    expected_degree = min(degree for weight, degree in feasible
+                          if weight == expected_weight)
+
+    actual = maximum_pattern(
+        positive, negative, observation, 2,
+        solver="cbc", positive_weight=weights,
+    )
+
+    assert actual is not None
+    assert actual.positive_coverage_weight == expected_weight
+    assert len(actual.pattern) == expected_degree
+
+
 def test_hammer_ilp_supports_finite_domains_and_robust_covering():
     positive = np.array([[0, 1, 2], [0, 2, 2], [1, 1, 2]])
     negative = np.array([[2, 0, 2], [2, 1, 0]])

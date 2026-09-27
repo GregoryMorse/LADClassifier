@@ -12,7 +12,6 @@ not require an integer-programming installation.
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +28,7 @@ class MaximumPatternSolution:
     pattern: Pattern
     positive_coverage: int
     solver: str
+    positive_coverage_weight: float | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +191,7 @@ def _maximum_pattern_with_factory(
     *,
     robustness: int,
     factory: _SolverFactory,
+    positive_weight: np.ndarray | None = None,
 ) -> MaximumPatternSolution | None:
     pulp = factory.pulp
     feature_count = positive.shape[1]
@@ -231,10 +232,13 @@ def _maximum_pattern_with_factory(
             f"exclude_negative_{row}",
         )
 
-    positive_differences = Counter(
-        tuple(np.flatnonzero(sample != observation).tolist())
-        for sample in positive
-    )
+    positive_differences: dict[tuple[int, ...], float] = {}
+    for index, sample in enumerate(positive):
+        differences = tuple(np.flatnonzero(sample != observation).tolist())
+        positive_differences[differences] = (
+            positive_differences.get(differences, 0.0)
+            + (1.0 if positive_weight is None else float(positive_weight[index]))
+        )
     weighted_covered = []
     for row, (differences, multiplicity) in enumerate(
         sorted(positive_differences.items(), key=lambda item: item[0])
@@ -258,13 +262,15 @@ def _maximum_pattern_with_factory(
 
     coverage_objective = pulp.lpSum(weighted_covered)
     degree_objective = pulp.lpSum(selected)
-    # One extra covered observation is worth more than the largest possible
-    # degree penalty. This is an exact lexicographic objective with modest
-    # integer coefficients: maximize prevalence first, then minimize literals.
-    coverage_weight = feature_count + 1
-    problem.setObjective(
-        coverage_weight * coverage_objective - degree_objective
-    )
+    if positive_weight is None:
+        # Integer coverage permits an exact one-pass lexicographic objective.
+        problem.setObjective(
+            (feature_count + 1) * coverage_objective - degree_objective
+        )
+    else:
+        # Fractional weights do not have a one-observation objective gap.
+        # Optimize weighted coverage first, then degree at that optimum.
+        problem.setObjective(coverage_objective)
     status = _solve(problem, factory)
     if status == "Infeasible":
         return None
@@ -272,18 +278,35 @@ def _maximum_pattern_with_factory(
         raise RuntimeError(
             f"maximum-pattern ILP did not prove an optimum with {factory.name}: {status}"
         )
+    if positive_weight is not None:
+        best_weight = float(pulp.value(coverage_objective))
+        tolerance = max(1e-9, abs(best_weight) * 1e-9)
+        problem += coverage_objective >= best_weight - tolerance
+        problem.sense = pulp.LpMinimize
+        problem.setObjective(degree_objective)
+        status = _solve(problem, factory)
+        if status != "Optimal":
+            raise RuntimeError(
+                f"weighted maximum-pattern tie-break did not prove an optimum: {status}"
+            )
     pattern = tuple(
         (feature, int(observation[feature]))
         for feature, variable in enumerate(selected)
         if float(variable.value()) > 0.5
     )
     positive_coverage = int(np.sum(_pattern_cover(positive, pattern)))
-    linearized_coverage = int(round(float(pulp.value(coverage_objective))))
-    if positive_coverage != linearized_coverage:
+    weighted_coverage = (
+        float(positive_coverage) if positive_weight is None else
+        float(np.sum(positive_weight[_pattern_cover(positive, pattern)]))
+    )
+    linearized_coverage = float(pulp.value(coverage_objective))
+    if not np.isclose(weighted_coverage, linearized_coverage, rtol=1e-8, atol=1e-8):
         raise AssertionError("linearized maximum-pattern coverage is inconsistent")
     if np.any(_pattern_cover(negative, pattern)):
         raise AssertionError("maximum-pattern ILP returned an impure pattern")
-    return MaximumPatternSolution(pattern, positive_coverage, factory.name)
+    return MaximumPatternSolution(
+        pattern, positive_coverage, factory.name, weighted_coverage
+    )
 
 
 def maximum_pattern(
@@ -297,12 +320,19 @@ def maximum_pattern(
     relative_gap: float = 0,
     robustness: int = 1,
     threads: int | None = 1,
+    positive_weight: np.ndarray | None = None,
 ) -> MaximumPatternSolution | None:
     """Solve the paper's exact linearized maximum ``omega``-pattern model."""
 
     positive, negative = _validate_observations(
         positive, negative, max_degree
     )
+    if positive_weight is not None:
+        positive_weight = np.asarray(positive_weight, dtype=float)
+        if (positive_weight.shape != (len(positive),)
+                or not np.all(np.isfinite(positive_weight))
+                or np.any(positive_weight <= 0)):
+            raise ValueError("positive_weight must be finite, positive, and aligned")
     observation = np.asarray(observation)
     if observation.shape != (positive.shape[1],):
         raise ValueError("observation must have one value per feature")
@@ -323,6 +353,7 @@ def maximum_pattern(
         max_degree,
         robustness=robustness,
         factory=factory,
+        positive_weight=positive_weight,
     )
 
 
@@ -420,7 +451,8 @@ def hammer_maximum_patterns(
     model_coverage: int = 1,
     max_anchors: int = 0,
     threads: int | None = 1,
-    min_positive_coverage: int = 1,
+    min_positive_coverage: float = 1,
+    positive_weight: np.ndarray | None = None,
 ) -> HammerPatternModel:
     """Generate one maximum pattern per distinct anchor, then form a model.
 
@@ -437,8 +469,14 @@ def hammer_maximum_patterns(
         raise ValueError("ILP model selection must be complete or minimum_cover")
     if max_anchors < 0:
         raise ValueError("max_anchors cannot be negative")
-    if min_positive_coverage < 1:
+    if min_positive_coverage <= 0:
         raise ValueError("min_positive_coverage must be positive")
+    if positive_weight is not None:
+        positive_weight = np.asarray(positive_weight, dtype=float)
+        if (positive_weight.shape != (len(positive),)
+                or not np.all(np.isfinite(positive_weight))
+                or np.any(positive_weight <= 0)):
+            raise ValueError("positive_weight must be finite, positive, and aligned")
     factory = _solver_factory(
         solver,
         time_limit_seconds=time_limit_seconds,
@@ -469,11 +507,16 @@ def hammer_maximum_patterns(
             max_degree,
             robustness=robustness,
             factory=factory,
+            positive_weight=positive_weight,
         )
         if solution is None:
             continue
         feasible_anchors += 1
-        if solution.positive_coverage >= min_positive_coverage:
+        covered = (
+            solution.positive_coverage if positive_weight is None
+            else solution.positive_coverage_weight
+        )
+        if covered is not None and covered >= min_positive_coverage:
             candidate_solutions[solution.pattern] = solution.positive_coverage
 
     candidates = tuple(

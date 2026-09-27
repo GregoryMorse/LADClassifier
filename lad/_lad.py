@@ -267,7 +267,7 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
     cut_points : list
         Returns a list, containing 2-tuples with the cutpoints.
     """
-    def _binarize(data, y, method=None, divisions=None):
+    def _binarize(data, y, method=None, divisions=None, sample_weight=None):
         if method is None: method = 'minimumdifferentiated'
         if divisions is None: divisions = 10
         if method == 'equaldivisions':
@@ -282,6 +282,21 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
                 divs = list()
             else:
                 divs = [(mn + dist * j, mn + dist * (j+1)) for j in range(divisions)]
+        elif method == 'equaldistribution' and sample_weight is not None:
+            # Recency-weighted empirical quantiles keep the discretizer on the
+            # same training measure as the downstream weighted pattern search.
+            order = np.argsort(data, kind='stable')
+            ordered = np.asarray(data)[order]
+            cumulative = np.cumsum(np.asarray(sample_weight)[order])
+            mass = cumulative[-1]
+            starts = [ordered[0]]
+            for j in range(1, divisions):
+                index = min(np.searchsorted(cumulative, mass * j / divisions,
+                                            side='right'), len(ordered) - 1)
+                if ordered[index] != starts[-1]:
+                    starts.append(ordered[index])
+            divs = [(start, starts[i + 1] if i + 1 < len(starts)
+                     else ordered[-1]) for i, start in enumerate(starts)]
         elif method == 'equaldistribution': #need to handle splits on equivalence groups, right now redundant or duplicate values possible
             sz, sorted = len(data), np.sort(data)
             divs = [(sorted[int(sz * j / divisions)], sorted[int(sz * (j+1) / divisions)-(1 if j == divisions-1 else 0)])
@@ -444,7 +459,7 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
         and already transposed for use in the LADClassifier.  The second is the binarizer
         parameters for the given features.  The last is the shape of all of the generated features.
     """
-    def _binarizeall(X, y, n_classes, classes, ymap, random_state, binarizer_params=None):
+    def _binarizeall(X, y, n_classes, classes, ymap, random_state, binarizer_params=None, sample_weight=None):
         #method='bestoutputgroups', max_bins=100, hist_range=(-1.0, 1.0), n_splits=5, feature_batch_size=200
         #method='outputgroups', max_bins=100, hist_range=(-1.0, 1.0), n_splits=5
         #method='histogram', max_bins=100, hist_range=(-1.0, 1.0)
@@ -461,7 +476,7 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
                     vals = DiscretizingTransformer._binarize_outputgroups(data, y, n_classes, classes, ymap, random_state,
                         binparams['max_bins'] if 'max_bins' in binparams else None, binparams['n_splits'] if 'n_splits' in binparams else None)
                 else:
-                    vals = DiscretizingTransformer._binarize(data, y, method=method, divisions=binparams['divisions'] if 'divisions' in binparams else None)
+                    vals = DiscretizingTransformer._binarize(data, y, method=method, divisions=binparams['divisions'] if 'divisions' in binparams else None, sample_weight=sample_weight)
                     bval = {'cut_points': vals, 'binarymode': binparams['binarymode'] if 'binarymode' in binparams else True, 'interval': binparams['interval'] if 'interval' in binparams else True}
                 binvals.append(bval)
         return binvals
@@ -706,7 +721,7 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
             idx = ymap[k]
             out_counts[num_bins-n_classes][idx][fold] += vals.shape[0]
             out_hist[num_bins-n_classes][idx][fold] += h
-    def fit(self, X, y=None):
+    def fit(self, X, y=None, sample_weight=None):
         """A reference implementation of a fitting function for a transformer.
 
         Parameters
@@ -735,11 +750,12 @@ class DiscretizingTransformer(BaseEstimator, TransformerMixin):
                 self.ymap_[k] = i
             self.binarizer_values_ = DiscretizingTransformer._binarizeall(
                 X, y, self.n_classes_, self.classes_, self.ymap_, self.random_state,
-                self.binarizer_params,
+                self.binarizer_params, sample_weight,
             )
         else:
             self.binarizer_values_ = DiscretizingTransformer._binarizeall(
                 X, y, None, None, None, self.random_state, self.binarizer_params,
+                sample_weight,
             )
         # Return the transformer
         return self
@@ -986,7 +1002,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                  ilp_relative_gap=0, ilp_robustness=1,
                  ilp_model_selection='minimum_cover', ilp_model_coverage=1,
                  ilp_max_anchors=0, ilp_threads=1,
-                 fit_time_limit_seconds=None):
+                 fit_time_limit_seconds=None, max_patterns_per_class=None,
+                 minimum_precision_lift=None):
         self.degree = degree
         self.random = random
         self.maxcombs = maxcombs
@@ -1007,6 +1024,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         self.ilp_max_anchors = ilp_max_anchors
         self.ilp_threads = ilp_threads
         self.fit_time_limit_seconds = fit_time_limit_seconds
+        self.max_patterns_per_class = max_patterns_per_class
+        self.minimum_precision_lift = minimum_precision_lift
         #self.mutual_exclusions = mutual_exclusions
         self._estimator_type = 'classifier' #needed for stratified k-folds in GridSearchCV
     #def _get_tags(self): return {'poor_score':True,'multioutput':True}
@@ -1142,7 +1161,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             cm = confusion_matrix(iris.target, o)
             print(clf.best_score_, cm, clf.best_estimator_.format_booleqs())
             plot_confusion_matrix(iris.target, o, classes=iris.target_names, cmap=plt.cm.Blues, normalize=False)
-    def fit(self, X, y):
+    def fit(self, X, y, sample_weight=None):
         """LAD classifer implementation of a fitting function.
         It first binarizes the data if necessary, then finds patterns
         until full sample coverage or convergence is determined not possible.
@@ -1153,6 +1172,9 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             The training input samples.
         y : array-like, shape (n_samples,)
             The target values. An array of int.
+        sample_weight : array-like, shape (n_samples,), optional
+            Positive observation weights used for class prevalence, pattern
+            precision, coverage, and fitted-rule scoring.
 
         Returns
         -------
@@ -1189,7 +1211,35 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             raise ValueError("Number of labels=%d "
                              "does not match number of samples=%d"
                              % (len(y), X.shape[0]))
+        if sample_weight is not None:
+            sample_weight = np.asarray(sample_weight, dtype=np.float64)
+            if (sample_weight.ndim != 1 or len(sample_weight) != len(y)
+                    or not np.all(np.isfinite(sample_weight))
+                    or np.any(sample_weight < 0)):
+                raise ValueError(
+                    'sample_weight must contain one finite nonnegative value per row'
+                )
+            if not np.any(sample_weight > 0):
+                raise ValueError('all sample weights are zero')
+            nonzero = sample_weight > 0
+            X, y, sample_weight = X[nonzero], y[nonzero], sample_weight[nonzero]
+        if (self.max_patterns_per_class is not None
+                and self.max_patterns_per_class < 1):
+            raise ValueError('max_patterns_per_class must be positive')
+        if (self.minimum_precision_lift is not None
+                and not 0 <= self.minimum_precision_lift < 1):
+            raise ValueError('minimum_precision_lift must be in [0, 1)')
         check_classification_targets(y)
+        self.sample_weight_sum_ = (
+            float(np.sum(sample_weight)) if sample_weight is not None
+            else float(len(y))
+        )
+        self.effective_sample_size_ = (
+            float(np.sum(sample_weight) ** 2 / np.sum(sample_weight ** 2))
+            if sample_weight is not None else float(len(y))
+        )
+        self.class_precision_thresholds_ = []
+        self.class_base_rates_ = []
         #self.mutex_ = self.mutual_exclusions[:] + self.mutex_
         #self.mutex_ = {y:x for x in self.mutex_ for y in x}
         self.outtype_ = y.dtype
@@ -1199,11 +1249,15 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             self.n_classes_ = self.classes_.shape[0]
             if self.n_classes_ < 2:
                 raise ValueError("LADClassifier cannot fit data with only 1 class")
-            self.default_class_ = self.classes_[np.argmax(np.bincount(idxs))]
+            self.default_class_ = self.classes_[np.argmax(
+                np.bincount(idxs, weights=sample_weight)
+            )]
             self.discretizer_ = DiscretizingTransformer(
                 self.binarizer_params, self.random_state, self.feature_names
             )
-            condarr = self.discretizer_.fit_transform(X, y)
+            condarr = self.discretizer_.fit_transform(
+                X, y, sample_weight=sample_weight
+            )
             self.binarizer_values_ = self.discretizer_.binarizer_values_
             self.bounds_ = self.discretizer_.binarizer_bounds(X)
             self.featnames_ = DiscretizingTransformer._binarizer_feat_names(
@@ -1211,7 +1265,10 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             )
             #condarr, self.binarizer_values_, self.bounds_ = LADClassifier.binarizeall(X, idxs, self.binarizer_params)
             #self.featnames_ = LADClassifier.binarizer_feat_names(self.binarizer_values_, self.feature_names)
-            self.booleqs_ = self._fit(condarr, y, self.classes_, self.bounds_)
+            self.booleqs_ = self._fit(
+                condarr, y, self.classes_, self.bounds_,
+                **({'sample_weight': sample_weight} if sample_weight is not None else {})
+            )
         else:
             self.n_outputs_ = y.shape[1]
             self.classes_ = list()
@@ -1230,12 +1287,16 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 self.classes_.append(classes_k)
                 self.n_classes_.append(classes_k.shape[0])
                 self.default_class_.append(
-                    classes_k[np.argmax(np.bincount(idxs))]
+                    classes_k[np.argmax(np.bincount(
+                        idxs, weights=sample_weight
+                    ))]
                 )
                 self.discretizer_.append(DiscretizingTransformer(
                     self.binarizer_params, self.random_state, self.feature_names
                 ))
-                condarr = self.discretizer_[k].fit_transform(X, y[:, k])
+                condarr = self.discretizer_[k].fit_transform(
+                    X, y[:, k], sample_weight=sample_weight
+                )
                 transformed_outputs.append(condarr)
                 binarizer_values = self.discretizer_[k].binarizer_values_
                 self.binarizer_values_.append(binarizer_values)
@@ -1253,10 +1314,11 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     y[:, k],
                     self.classes_[k],
                     self.bounds_[k],
+                    **({'sample_weight': sample_weight} if sample_weight is not None else {})
                 )
         self.fit_elapsed_seconds_ = perf_counter() - self._fit_started_at_
         return self
-    def _fit(self, X, y, classes, curbounds):
+    def _fit(self, X, y, classes, curbounds, sample_weight=None):
         if self.pattern_method not in {
             'alexe_hammer', 'chambon_ppc2_prime', 'chambon_ppc2_strong',
             'hammer_ilp'
@@ -1270,8 +1332,20 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         if self.degree_strategy == 'gardy_2022':
             selected_by_class = []
             for target_class in classes:
-                positive_count = int(np.sum(y == target_class))
-                negative_count = len(y) - positive_count
+                if sample_weight is None:
+                    positive_count = int(np.sum(y == target_class))
+                    negative_count = len(y) - positive_count
+                else:
+                    positive_weights = sample_weight[y == target_class]
+                    negative_weights = sample_weight[y != target_class]
+                    positive_count = max(1, int(
+                        positive_weights.sum() ** 2
+                        / np.square(positive_weights).sum()
+                    ))
+                    negative_count = max(1, int(
+                        negative_weights.sum() ** 2
+                        / np.square(negative_weights).sum()
+                    ))
                 selected, probabilities = _reasonable_degree_bound(
                     X.shape[1], maximum_degree, positive_count, negative_count
                 )
@@ -1296,14 +1370,21 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
 
         if self.pattern_method == 'alexe_hammer':
             return self._fit_intervals(
-                X, y, classes, curbounds, selected_degree=selected_degree
+                X, y, classes, curbounds, selected_degree=selected_degree,
+                sample_weight=sample_weight,
+            )
+        if sample_weight is not None and self.pattern_method.startswith('chambon'):
+            raise ValueError(
+                'weighted PPC2 patterns are not implemented; use alexe_hammer or hammer_ilp'
             )
         if self.threshold_pct != 1:
             raise ValueError(
                 'pure-pattern engines require threshold_pct=1'
             )
         if self.pattern_method == 'hammer_ilp':
-            return self._fit_hammer_ilp(X, y, classes, selected_degree)
+            return self._fit_hammer_ilp(
+                X, y, classes, selected_degree, sample_weight=sample_weight
+            )
         return self._fit_ppc2(
             X,
             y,
@@ -1338,15 +1419,23 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         finaleqs.sort(key=lambda result: result[0], reverse=True)
         return finaleqs
 
-    def _fit_hammer_ilp(self, X, y, classes, degree):
+    def _fit_hammer_ilp(self, X, y, classes, degree, *, sample_weight=None):
         """Generate maximum patterns and optionally an exact minimum cover."""
 
-        minmatch = max(1, int(len(y) * self.minmatch_pct))
+        minmatch = (
+            max(1, int(len(y) * self.minmatch_pct))
+            if sample_weight is None
+            else float(np.sum(sample_weight) * self.minmatch_pct)
+        )
         finaleqs = []
         self.ilp_diagnostics_ = []
         for target_class in classes:
             positive = X[y == target_class]
             negative = X[y != target_class]
+            positive_weight = (
+                None if sample_weight is None
+                else sample_weight[y == target_class]
+            )
             result = _hammer_maximum_patterns(
                 positive,
                 negative,
@@ -1360,11 +1449,15 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 max_anchors=self.ilp_max_anchors,
                 threads=self.ilp_threads,
                 min_positive_coverage=minmatch,
+                positive_weight=positive_weight,
             )
             equations = list(result.patterns)
             predictions = self._predict(X, equations)
             finaleqs.append((
-                f1_score(y == target_class, predictions, pos_label=True),
+                f1_score(
+                    y == target_class, predictions, pos_label=True,
+                    sample_weight=sample_weight,
+                ),
                 target_class,
                 equations,
             ))
@@ -1381,12 +1474,40 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         finaleqs.sort(key=lambda result: result[0], reverse=True)
         return finaleqs
 
-    def _fit_intervals(self, X, y, classes, curbounds, *, selected_degree): #in DNF, if want CNF, can negate X and y per DeMorgan's law?
+    def _fit_intervals(self, X, y, classes, curbounds, *, selected_degree,
+                       sample_weight=None): #in DNF, if want CNF, can negate X and y per DeMorgan's law?
         #print(X.shape[1])
-        vals, origsz = list(), len(X)
+        vals, origsz = list(), (
+            len(X) if sample_weight is None else float(np.sum(sample_weight))
+        )
+        class_weights = []
         for k in classes:
             vals.append(X[y == k,:])
-        minmatch = int(len(y) * self.minmatch_pct)
+            class_weights.append(
+                None if sample_weight is None else sample_weight[y == k]
+            )
+        class_thresholds = [
+            self.threshold_pct
+            if self.minimum_precision_lift is None else
+            min(1.0, (
+                len(values) if weights is None else float(np.sum(weights))
+            ) / origsz + self.minimum_precision_lift)
+            for values, weights in zip(vals, class_weights)
+        ]
+        self.class_precision_thresholds_.append(
+            {str(target): float(value) for target, value in zip(classes, class_thresholds)}
+        )
+        self.class_base_rates_.append({
+            str(target): float((
+                len(values) if weights is None else np.sum(weights)
+            ) / origsz)
+            for target, values, weights in zip(classes, vals, class_weights)
+        })
+        minmatch = (
+            int(len(y) * self.minmatch_pct)
+            if sample_weight is None
+            else origsz * self.minmatch_pct
+        )
         import itertools
         class _FitDeadlineReached(Exception):
             pass
@@ -1437,7 +1558,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 sigmaI = counts[k] / tot
                 if not self.penalty_value is None:
                     sigmaI = prec_penalty(sigmaI, counts[k] / origsz)
-                if sigmaI >= self.threshold_pct and counts[k] >= minmatch:
+                if sigmaI >= class_thresholds[k] and counts[k] >= minmatch:
                     do_add_permute(cmb, sigmaI, counts[k], pats[k], pattrie[k]) #positive pattern
         def do_add_permute(cmb, sigmaI, num, pats, pattrie):
             #if len(pats) > maxconds * 2: del pats[:-maxconds]
@@ -1488,6 +1609,16 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     if sigmaI < pats[mid][0]: hi = mid
                     else: lo = mid+1
                 pats.insert(lo, (sigmaI, num, found))
+                if (self.max_patterns_per_class is not None
+                        and len(pats) > self.max_patterns_per_class):
+                    pats.pop(min(
+                        range(len(pats)),
+                        key=lambda index: (
+                            (pats[index][0] - 0.5)
+                            * np.sqrt(max(0.0, pats[index][1])),
+                            pats[index][1],
+                        ),
+                    ))
         def calc_permute(comb, pats, pattrie):
             enforce_fit_deadline()
             #deg = len(comb)
@@ -1505,11 +1636,17 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 gcodesdict[bounds] = gcodes
             #print(bounds)
             PiV0s = list()
-            for v in vals:
-                M = np.zeros(bounds, dtype=np.uint32)
+            for v, weights in zip(vals, class_weights):
+                M = np.zeros(
+                    bounds,
+                    dtype=np.uint32 if weights is None else np.float64,
+                )
                 r = v[:,comb]
                 #for x in r.astype(np.uint32): M[tuple(x)] += 1
-                np.add.at(M, tuple(r.T.astype(np.uint32)), 1)
+                np.add.at(
+                    M, tuple(r.T.astype(np.uint32)),
+                    1 if weights is None else weights,
+                )
                 PiV0s.append(calc_PI_V0(M)) #start at tuple([1] * deg)
             #idx = tuple([1] * deg)
             b = gcodes[0][0] #initial PI_V0 index
@@ -1531,7 +1668,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     np.divide(counts[k], tots, where=tots!=0, out=sigmaI)
                     if not self.penalty_value is None:
                         sigmaI = prec_penalty(sigmaI, counts[k] / origsz)
-                    for i in np.argwhere((sigmaI >= self.threshold_pct) & (counts[k] >= minmatch)):
+                    for i in np.argwhere((sigmaI >= class_thresholds[k]) & (counts[k] >= minmatch)):
                         ti = tuple(i)
                         #print(i, bounds, origidxs.shape, sigmaI.shape, counts[k].shape, origidxs[ti], V, cmb, np.argwhere((sigmaI >= self.threshold_pct) & (counts[k] >= minmatch)))
                         same = V == origidxs[ti]
@@ -1608,8 +1745,18 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                         else:
                             #preds = self._predict(X, [x for x in pats[k].keys()])
                             preds = self._predict(X, [x[2] for x in pats[k]])
-                            falsepos = np.sum(preds & (y != classes[k]))
-                            falsethresh.append(falsepos > len(vals[k]) * (1 - self.threshold_pct))
+                            falsepos = (
+                                np.sum(preds & (y != classes[k]))
+                                if sample_weight is None else
+                                np.sum(sample_weight[preds & (y != classes[k])])
+                            )
+                            class_mass = (
+                                len(vals[k]) if sample_weight is None else
+                                np.sum(class_weights[k])
+                            )
+                            falsethresh.append(
+                                falsepos > class_mass * (1 - class_thresholds[k])
+                            )
                             remaining = np.nonzero(~preds & (y == classes[k]))[0]
                         rem.append(len(remaining))
                         pmt.extend([np.nonzero(X[remaining[x]])[0] for x in range(len(remaining))])
@@ -1643,7 +1790,12 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             # and must never escape through the public fitted model.
             eqs = [x[2] for x in pats[k] if len(x[2]) != 0]
             preds = self._predict(X, eqs)
-            finaleqs.append((f1_score(y == classes[k], preds, pos_label=True), classes[k], eqs))
+            finaleqs.append((
+                f1_score(
+                    y == classes[k], preds, pos_label=True,
+                    sample_weight=sample_weight,
+                ), classes[k], eqs,
+            ))
         #print(minmatch, accuracy_score(y, preds), accuracy_score(y, negpreds), pats, negpats)
         #print(preferpos, cm, mcc(cm), cmneg, mcc(cmneg))
         finaleqs.sort(reverse=True)
@@ -1729,7 +1881,9 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 'ilp_model_coverage':self.ilp_model_coverage,
                 'ilp_max_anchors':self.ilp_max_anchors,
                 'ilp_threads':self.ilp_threads,
-                'fit_time_limit_seconds':self.fit_time_limit_seconds}
+                'fit_time_limit_seconds':self.fit_time_limit_seconds,
+                'max_patterns_per_class':self.max_patterns_per_class,
+                'minimum_precision_lift':self.minimum_precision_lift}
                 #'mutual_exclusions':self.mutual_exclusions}
     def set_params(self, **params):
         if 'degree' in params: self.degree = params['degree']
@@ -1751,6 +1905,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         if 'ilp_max_anchors' in params: self.ilp_max_anchors = params['ilp_max_anchors']
         if 'ilp_threads' in params: self.ilp_threads = params['ilp_threads']
         if 'fit_time_limit_seconds' in params: self.fit_time_limit_seconds = params['fit_time_limit_seconds']
+        if 'max_patterns_per_class' in params: self.max_patterns_per_class = params['max_patterns_per_class']
+        if 'minimum_precision_lift' in params: self.minimum_precision_lift = params['minimum_precision_lift']
         #if 'mutual_exclusions' in params: self.mutual_exclusions = params['mutual_exclusions']
         return self
 def test_lad():
