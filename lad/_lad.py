@@ -919,10 +919,25 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         combinations are tried.  If the degree is greater than or equal to
         the number of features, a random search will not be used regardless
         of this parameter.
-    maxcombs : int, default=2000
-        For a random search, the maximum number of combinations to try before
-        recomputing the rows remaining and checking if convergence is occurring.
-    threshold_pct : float, default=0.9
+    maxcombs : int, default=100
+        Number of shuffled projection PASSES before coverage is recomputed.
+        Each pass evaluates several projections, and adaptive coverage search
+        can run additional passes. This is not a total combination limit.
+    max_projection_evaluations : int or None, default=None
+        Total projection evaluations across a fit, including all outputs.
+        Completion of this deterministic search budget preserves supported
+        best-so-far rules; it is distinct from a wall-clock timeout.
+    binary_projection_fast_path : bool, default=False
+        Use exact weighted cell counts for binary projections of degree <= 4.
+        Enumerates all nonempty partial conjunctions within each projection;
+        candidate order differs from the legacy Gray-code path.
+    minimum_precision_lift : float or None, default=None
+        Replace threshold_pct with weighted class prevalence plus this lift
+        (capped at one). This is training purity, not statistical significance.
+    minimum_precision_floor : float or None, default=None
+        Additional absolute floor applied to either precision policy. Set
+        together with minimum_precision_lift to require BOTH floor and lift.
+    threshold_pct : float, default=1
         The minimum precision of a pattern for it to be considered.
     minmatch_pct : float, default=0.001
         The minimum percentage of all samples which must be found covered by a
@@ -1003,7 +1018,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                  ilp_model_selection='minimum_cover', ilp_model_coverage=1,
                  ilp_max_anchors=0, ilp_threads=1,
                  fit_time_limit_seconds=None, max_patterns_per_class=None,
-                 minimum_precision_lift=None):
+                 minimum_precision_lift=None, minimum_precision_floor=None,
+                 max_projection_evaluations=None, binary_projection_fast_path=False):
         self.degree = degree
         self.random = random
         self.maxcombs = maxcombs
@@ -1026,6 +1042,9 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         self.fit_time_limit_seconds = fit_time_limit_seconds
         self.max_patterns_per_class = max_patterns_per_class
         self.minimum_precision_lift = minimum_precision_lift
+        self.minimum_precision_floor = minimum_precision_floor
+        self.max_projection_evaluations = max_projection_evaluations
+        self.binary_projection_fast_path = binary_projection_fast_path
         #self.mutual_exclusions = mutual_exclusions
         self._estimator_type = 'classifier' #needed for stratified k-folds in GridSearchCV
     #def _get_tags(self): return {'poor_score':True,'multioutput':True}
@@ -1189,6 +1208,9 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         if self.fit_time_limit_seconds is not None and self.fit_time_limit_seconds <= 0:
             raise ValueError('fit_time_limit_seconds must be positive or None')
         self.fit_timed_out_ = False
+        self.projection_evaluations_ = 0
+        self.projection_budget_exhausted_ = False
+        self.binary_fast_projection_evaluations_ = 0
         self._fit_started_at_ = perf_counter()
         self._fit_deadline_ = (
             self._fit_started_at_ + self.fit_time_limit_seconds
@@ -1229,6 +1251,16 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         if (self.minimum_precision_lift is not None
                 and not 0 <= self.minimum_precision_lift < 1):
             raise ValueError('minimum_precision_lift must be in [0, 1)')
+        if (self.minimum_precision_floor is not None
+                and not 0 <= self.minimum_precision_floor <= 1):
+            raise ValueError('minimum_precision_floor must be in [0, 1]')
+        if (self.max_projection_evaluations is not None and (
+                isinstance(self.max_projection_evaluations, (bool, np.bool_))
+                or not isinstance(self.max_projection_evaluations, (int, np.integer))
+                or self.max_projection_evaluations < 1)):
+            raise ValueError('max_projection_evaluations must be a positive integer or None')
+        if not isinstance(self.binary_projection_fast_path, (bool, np.bool_)):
+            raise ValueError('binary_projection_fast_path must be Boolean')
         check_classification_targets(y)
         self.sample_weight_sum_ = (
             float(np.sum(sample_weight)) if sample_weight is not None
@@ -1494,6 +1526,9 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             ) / origsz + self.minimum_precision_lift)
             for values, weights in zip(vals, class_weights)
         ]
+        if self.minimum_precision_floor is not None:
+            class_thresholds = [max(self.minimum_precision_floor, value)
+                                for value in class_thresholds]
         self.class_precision_thresholds_.append(
             {str(target): float(value) for target, value in zip(classes, class_thresholds)}
         )
@@ -1510,6 +1545,8 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         )
         import itertools
         class _FitDeadlineReached(Exception):
+            pass
+        class _ProjectionBudgetReached(Exception):
             pass
 
         def enforce_fit_deadline():
@@ -1533,22 +1570,16 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 istar,
                 Tistar,
             )
-        @numba.njit
         def subpat(a, b): #for two sorted lists, -1 no relation, 0 if a contains b, 1 if b contains a, 2 if a==b
-            i1, i2 = len(a) - 1, len(b) - 1
-            l1, l2 = i1, i2
-            while i1 != -1 and i2 != -1: #could use binary search here, hardly matters for normally small degrees
-                if a[i1] < b[i2]:
-                    while i2 != -1 and b[i2] > a[i1]: i2 -= 1
-                else:
-                    while i1 != -1 and a[i1] > b[i2]: i1 -= 1
-                if i1 == -1 or i2 == -1: return -1
-                while i1 != -1 and i2 != -1 and a[i1] == b[i2]: i1, i2 = i1 - 1, i2 - 1
-            if i1 == -1:
-                if i2 != -1: return 1
-                if l1 == l2: return 2
-                return 0 if l1 > l2 else 1
-            elif i2 == -1: return 0
+            # The old two-pointer intersection skipped unequal literals and
+            # then called equal-length patterns identical when a prefix
+            # matched. E.g. (a=0,b=0) and (a=0,b=1) are NOT duplicates.
+            # Sets are exact and cheap at degree <= 4, and avoid recompiling
+            # a nested Numba dispatcher on every fold.
+            left, right = set(a), set(b)
+            if left == right: return 2
+            if right < left: return 0
+            if left < right: return 1
             return -1
         #assert(np.all([subpat(list(), list()) == 2, subpat([1], [0]) == -1, subpat([1], [1]) == 2, subpat([1], [1, 2]) == 1,
         #       subpat([1, 2], [1]) == 0, subpat([2], [1, 2]) == 1, subpat([1, 2], [2]) == 0, subpat([1, 3], [1, 2, 3]) == 1, subpat([1, 2, 3], [1, 3]) == 0]))
@@ -1621,6 +1652,10 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     ))
         def calc_permute(comb, pats, pattrie):
             enforce_fit_deadline()
+            if (self.max_projection_evaluations is not None
+                    and self.projection_evaluations_ >= self.max_projection_evaluations):
+                raise _ProjectionBudgetReached()
+            self.projection_evaluations_ += 1
             #deg = len(comb)
             #gcodes = extended_gray_code(tuple([1] * deg))
             #if deg == 1: #fast route for single features
@@ -1630,6 +1665,39 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
             #    add_permute(comb, pos / tot, pos, neg, pats)
             #else:
             bounds = tuple([curbounds[x] for x in comb])
+            if (self.binary_projection_fast_path and len(comb) <= 4
+                    and all(bound == 2 for bound in bounds)):
+                # A binary projection has at most 16 cells and 80 nonempty
+                # partial conjunctions. Count each weighted cell once, then
+                # sum cells for every conjunction. Never collapse conflicting
+                # labels or replace recency weights with row counts.
+                size = len(comb)
+                if size not in binary_templates:
+                    templates = np.array(list(itertools.product((-1, 0, 1), repeat=size)))
+                    templates = templates[np.any(templates != -1, axis=1)]
+                    cells = np.array(list(itertools.product((0, 1), repeat=size)))
+                    membership = np.all((templates[:, None, :] == -1)
+                        | (templates[:, None, :] == cells[None, :, :]), axis=2)
+                    binary_templates[size] = (templates, membership.astype(float))
+                templates, membership = binary_templates[size]
+                powers = 1 << np.arange(size-1, -1, -1)
+                histograms = []
+                for values, weights in zip(vals, class_weights):
+                    codes = values[:, comb].astype(np.int64) @ powers
+                    histograms.append(np.bincount(codes, weights=weights, minlength=1 << size))
+                counts = np.asarray(histograms) @ membership.T
+                totals = counts.sum(axis=0)
+                for k in range(len(counts)):
+                    precision = np.divide(counts[k], totals, out=np.zeros_like(totals), where=totals > 0)
+                    if self.penalty_value is not None:
+                        precision = prec_penalty(precision, counts[k] / origsz)
+                    for index in np.flatnonzero((precision >= class_thresholds[k]) & (counts[k] >= minmatch)):
+                        enforce_fit_deadline()
+                        template = templates[index]
+                        literals = [(int(column), int(value)) for column, value in zip(comb, template) if value != -1]
+                        do_add_permute(literals, precision[index], counts[k][index], pats[k], pattrie[k])
+                self.binary_fast_projection_evaluations_ += 1
+                return
             if bounds in gcodesdict: gcodes = gcodesdict[bounds]
             else:
                 gcodes = mod_gray_code(tuple([x - 1 for x in bounds])) #extended_gray_code(tuple([x - 1 for x in bounds]))
@@ -1708,7 +1776,7 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 Vistar, Vprimeistar, Tistar = V[istar], nextgcode[0][istar], nextgcode[2][istar]
                 for k in range(lenPiV0s):
                     PiV0s[k] = calc_PI_VI(Vistar, Vprimeistar, istar, Tistar, PiV0s[k])
-        gcodesdict, degree = dict(), selected_degree
+        gcodesdict, binary_templates, degree = dict(), dict(), selected_degree
         if np.all(X.shape == 2):
             gcodesdict[tuple([2] * degree)] = mod_gray_code(tuple([1] * degree)) #extended_gray_code(tuple([1] * degree))
         permute = np.arange(X.shape[1], dtype=np.int32)
@@ -1781,6 +1849,11 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                     calc_permute(comb, pats, pattrie)
         except _FitDeadlineReached:
             self.fit_timed_out_ = True
+        except _ProjectionBudgetReached:
+            self.projection_budget_exhausted_ = True
+        if (self.max_projection_evaluations is not None
+                and self.projection_evaluations_ >= self.max_projection_evaluations):
+            self.projection_budget_exhausted_ = True
         #print(pats, negpats)
         finaleqs = list()
         for k in range(len(pats)):
@@ -1883,7 +1956,10 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
                 'ilp_threads':self.ilp_threads,
                 'fit_time_limit_seconds':self.fit_time_limit_seconds,
                 'max_patterns_per_class':self.max_patterns_per_class,
-                'minimum_precision_lift':self.minimum_precision_lift}
+                'minimum_precision_lift':self.minimum_precision_lift,
+                'minimum_precision_floor':self.minimum_precision_floor,
+                'max_projection_evaluations':self.max_projection_evaluations,
+                'binary_projection_fast_path':self.binary_projection_fast_path}
                 #'mutual_exclusions':self.mutual_exclusions}
     def set_params(self, **params):
         if 'degree' in params: self.degree = params['degree']
@@ -1907,6 +1983,9 @@ class LADClassifier(ClassifierMixin, MultiOutputMixin, BaseEstimator):
         if 'fit_time_limit_seconds' in params: self.fit_time_limit_seconds = params['fit_time_limit_seconds']
         if 'max_patterns_per_class' in params: self.max_patterns_per_class = params['max_patterns_per_class']
         if 'minimum_precision_lift' in params: self.minimum_precision_lift = params['minimum_precision_lift']
+        if 'minimum_precision_floor' in params: self.minimum_precision_floor = params['minimum_precision_floor']
+        if 'max_projection_evaluations' in params: self.max_projection_evaluations = params['max_projection_evaluations']
+        if 'binary_projection_fast_path' in params: self.binary_projection_fast_path = params['binary_projection_fast_path']
         #if 'mutual_exclusions' in params: self.mutual_exclusions = params['mutual_exclusions']
         return self
 def test_lad():
